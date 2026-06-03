@@ -1,0 +1,21 @@
+# Project docs (kept local, not published)
+/docs/
+
+# Compiled binary
+/mp-telegram-bot
+/bin/
+
+# Go build/test artifacts
+*.exe
+*.test
+*.out
+/vendor/
+
+# Local env / secrets — never commit the bot token
+.env
+*.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
