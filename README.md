@@ -78,11 +78,10 @@ sees their chat).
 - **Deployment:** GitOps with Flux from a **public** repo. Bot token is kept out of git
   via a SOPS-encrypted Secret; CNPG credentials live entirely in-cluster.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detail, including the two critical gotchas:
-**run exactly one replica** (Telegram allows only one active `getUpdates` poll per token —
-a second gets `409 Conflict`) and use the **`Recreate`** update strategy so rollouts don't
-briefly run two pollers.
+Two critical deployment gotchas follow from the design: **run exactly one replica**
+(Telegram allows only one active `getUpdates` poll per token — a second gets
+`409 Conflict`), and use the **`Recreate`** update strategy so rollouts don't briefly run
+two pollers.
 
 ## Legal / compliance
 
@@ -94,7 +93,7 @@ deletion command, data minimisation, and pruning users who block the bot.
 The **ICO fee** is not owed for this project (non-commercial, no income — confirmed via the
 ICO self-assessment). That status is fragile: **affiliate links** or paid promotion on an
 associated blog would trigger the fee. An unpaid, genuine "I like tool X" mention or a
-plain "buy me a coffee" tip jar does not. See [docs/COMPLIANCE.md](docs/COMPLIANCE.md).
+plain "buy me a coffee" tip jar does not.
 
 *Not legal advice.*
 
@@ -116,5 +115,5 @@ repo).
 
 ## Status
 
-Early. Module initialised (`go mod init mp-telegram-bot`, Go 1.26). No application code yet
-— development will proceed test-first, in vertical slices.
+Early. Go module initialised (`github.com/Rolyani/mp-telegram-bot`, Go 1.26). No
+application code yet — development will proceed test-first, in vertical slices.
