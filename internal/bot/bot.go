@@ -27,6 +27,11 @@ func (s *MemoryStore) AddChat(chatID int64) {
 	s.chats[chatID] = true
 }
 
+// RemoveChat forgets a chat ID
+func (s *MemoryStore) RemoveChat(chatID int64) {
+	delete(s.chats, chatID)
+}
+
 // HasChat reports whether the chat was recorded
 func (s *MemoryStore) HasChat(chatID int64) bool {
 	return s.chats[chatID]
@@ -43,17 +48,23 @@ func (s *MemoryStore) Chats() []int64 {
 
 // HandleUpdate processes an update and returns a reply
 func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
-	if update.Text != "/start" {
+	switch update.Text {
+	case "/start":
+		store.AddChat(update.ChatID)
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "Welcome! Send /start to get going.",
+		}, nil
+	case "/stop":
+		store.RemoveChat(update.ChatID)
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "Your details have been removed.",
+		}, nil
+	default:
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "Use /start to begin.",
 		}, nil
 	}
-
-	store.AddChat(update.ChatID)
-	return Reply{
-		ChatID: update.ChatID,
-		Text:   "Welcome! Send /start to get going.",
-	}, nil
-
 }

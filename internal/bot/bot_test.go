@@ -6,6 +6,74 @@ import (
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
 
+// Slice 5: Broadcast sends one reply per recorded subscriber, each addressed to
+// that chat and carrying the same message. Chats() is unsorted, so we compare the
+// replies as a set (chatID -> text), never by position.
+func TestBroadcast_sendsMessageToEverySubscriber(t *testing.T) {
+	store := bot.NewMemoryStore()
+	for _, id := range []int64{1, 2} {
+		if _, err := bot.HandleUpdate(bot.Update{ChatID: id, Text: "/start"}, store); err != nil {
+			t.Fatalf("subscribing chat %d: %v", id, err)
+		}
+	}
+
+	const msg = "Division at 7pm"
+	replies := bot.Broadcast(msg, store)
+
+	got := make(map[int64]string)
+	for _, r := range replies {
+		got[r.ChatID] = r.Text
+	}
+	want := map[int64]string{1: msg, 2: msg}
+
+	if len(replies) != len(want) {
+		t.Fatalf("Broadcast returned %d replies, want %d: %+v", len(replies), len(want), replies)
+	}
+	for id, text := range want {
+		if got[id] != text {
+			t.Errorf("reply to chat %d = %q, want %q", id, got[id], text)
+		}
+	}
+}
+
+// Slice 4: /stop unsubscribes — a chat that previously /start-ed is removed
+// from the store, and gets a goodbye reply addressed to it, distinct from the
+// welcome. Drives a remove side-effect (the mirror of /start's record).
+func TestHandleUpdate_stop_unsubscribesAndDistinctReply(t *testing.T) {
+	store := bot.NewMemoryStore()
+
+	// Arrange: chat 42 is subscribed. Capture the welcome behaviorally so we
+	// can assert the goodbye differs from it without hardcoding either string.
+	welcome, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/start) returned error: %v", err)
+	}
+	if !store.HasChat(42) {
+		t.Fatalf("precondition failed: chat 42 not recorded after /start")
+	}
+
+	// Act: chat 42 sends /stop.
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/stop"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/stop) returned error: %v", err)
+	}
+
+	// Assert: removed from the store.
+	if store.HasChat(42) {
+		t.Errorf("chat 42 still recorded after /stop, want it removed")
+	}
+	// Assert: goodbye addressed back to the chat, non-empty, distinct from welcome.
+	if reply.ChatID != 42 {
+		t.Errorf("reply addressed to chat %d, want 42", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want a goodbye message")
+	}
+	if reply.Text == welcome.Text {
+		t.Errorf("/stop got the welcome reply %q, want a distinct goodbye", reply.Text)
+	}
+}
+
 // Slice 3: /start is idempotent — a repeated /start from the same chat must
 // not duplicate the chat in the store. Pinning that requires enumerating the
 // store via Chats(), the accessor broadcasting will need anyway.
