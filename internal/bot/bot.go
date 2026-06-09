@@ -46,6 +46,16 @@ func (s *MemoryStore) Chats() []int64 {
 	return keys
 }
 
+// Broadcast builds one reply per recorded subscriber, carrying msg.
+func Broadcast(msg string, store *MemoryStore) []Reply {
+	chats := store.Chats()
+	replies := make([]Reply, 0, len(chats))
+	for _, id := range chats {
+		replies = append(replies, Reply{ChatID: id, Text: msg})
+	}
+	return replies
+}
+
 // HandleUpdate processes an update and returns a reply
 func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 	switch update.Text {
