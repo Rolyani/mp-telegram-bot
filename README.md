@@ -1,7 +1,7 @@
 # mp-telegram-bot
 
 A Telegram bot that lets anyone follow a UK Member of Parliament and get pushed a
-message whenever that MP does something in Parliament — votes in a division, tables a
+message whenever that MP does something in Parliament, votes in a division, tables a
 written question, or speaks in the chamber. Written in **Go**.
 
 > Contains Parliamentary information licensed under the Open Parliament Licence v3.0.
@@ -94,8 +94,6 @@ The **ICO fee** is not owed for this project (non-commercial, no income — conf
 ICO self-assessment). That status is fragile: **affiliate links** or paid promotion on an
 associated blog would trigger the fee. An unpaid, genuine "I like tool X" mention or a
 plain "buy me a coffee" tip jar does not.
-
-*Not legal advice.*
 
 ## Licence
 
