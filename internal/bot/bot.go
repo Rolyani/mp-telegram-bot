@@ -86,10 +86,17 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 			Text:   "Your details have been removed.",
 		}, nil
 	case "/follow":
-		store.FollowMP(update.ChatID, arg)
+		name := strings.TrimSpace(arg)
+		if name == "" {
+			return Reply{
+				ChatID: update.ChatID,
+				Text:   "You must enter a name.",
+			}, nil
+		}
+		store.FollowMP(update.ChatID, name)
 		return Reply{
 			ChatID: update.ChatID,
-			Text:   "Now following " + arg + ".",
+			Text:   "Now following " + name + ".",
 		}, nil
 	default:
 		return Reply{

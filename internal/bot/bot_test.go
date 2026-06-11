@@ -6,6 +6,43 @@ import (
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
 
+// Slice 7: /follow with no MP name must not record an empty follow, and must reply
+// with a usage hint distinct from the success confirmation. Covers both a bare
+// "/follow" (no argument) and "/follow   " (whitespace-only argument) — the latter
+// pins that the guard trims before deciding, so spaces alone don't count as a name.
+func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
+	// Capture the success confirmation behaviorally so we can assert the hint differs
+	// from it without hardcoding either string.
+	confirm, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow Keir Starmer"}, bot.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("HandleUpdate(/follow <name>) returned error: %v", err)
+	}
+
+	for _, text := range []string{"/follow", "/follow   "} {
+		t.Run(text, func(t *testing.T) {
+			store := bot.NewMemoryStore()
+
+			reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: text}, store)
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
+			}
+
+			if got := store.Follows(7); len(got) != 0 {
+				t.Errorf("store.Follows(7) = %v, want nothing recorded for %q", got, text)
+			}
+			if reply.ChatID != 7 {
+				t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+			}
+			if reply.Text == "" {
+				t.Errorf("reply.Text is empty, want a usage hint")
+			}
+			if reply.Text == confirm.Text {
+				t.Errorf("got the success confirmation %q, want a distinct usage hint", reply.Text)
+			}
+		})
+	}
+}
+
 // Slice 6: /follow <name> records that the chat follows that MP, readable back via
 // a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
 // this pins that HandleUpdate splits the command from its argument on the FIRST space
