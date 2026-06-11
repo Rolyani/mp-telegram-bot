@@ -98,6 +98,12 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 			ChatID: update.ChatID,
 			Text:   "Now following " + name + ".",
 		}, nil
+	case "/list":
+		follows := store.Follows(update.ChatID)
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "You follow: " + strings.Join(follows, ", "),
+		}, nil
 	default:
 		return Reply{
 			ChatID: update.ChatID,

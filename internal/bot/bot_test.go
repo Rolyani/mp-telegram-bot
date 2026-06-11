@@ -1,10 +1,40 @@
 package bot_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
+
+// Slice 8: /list replies with the MPs the chat follows. After following two MPs, the
+// reply is addressed back to the chat and mentions each by name. Substring checks keep
+// the exact formatting and ordering free to change. (The "follows nobody" case is a
+// distinct behavior — its own later slice, not this one.)
+func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
+	store := bot.NewMemoryStore()
+
+	mps := []string{"Keir Starmer", "Rishi Sunak"}
+	for _, mp := range mps {
+		if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store); err != nil {
+			t.Fatalf("following %q: %v", mp, err)
+		}
+	}
+
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/list"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/list) returned error: %v", err)
+	}
+
+	if reply.ChatID != 42 {
+		t.Errorf("reply addressed to chat %d, want 42", reply.ChatID)
+	}
+	for _, mp := range mps {
+		if !strings.Contains(reply.Text, mp) {
+			t.Errorf("reply %q does not mention followed MP %q", reply.Text, mp)
+		}
+	}
+}
 
 // Slice 7: /follow with no MP name must not record an empty follow, and must reply
 // with a usage hint distinct from the success confirmation. Covers both a bare
