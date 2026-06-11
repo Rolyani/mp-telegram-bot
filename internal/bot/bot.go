@@ -1,5 +1,7 @@
 package bot
 
+import "strings"
+
 // Update represents an incoming message
 type Update struct {
 	ChatID int64
@@ -14,12 +16,13 @@ type Reply struct {
 
 // MemoryStore remembers chat IDs
 type MemoryStore struct {
-	chats map[int64]bool
+	chats   map[int64]bool
+	follows map[int64][]string
 }
 
 // NewMemoryStore returns a ready to use *MemoryStore
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{chats: make(map[int64]bool)}
+	return &MemoryStore{chats: make(map[int64]bool), follows: make(map[int64][]string)}
 }
 
 // AddChat records a chat ID
@@ -35,6 +38,16 @@ func (s *MemoryStore) RemoveChat(chatID int64) {
 // HasChat reports whether the chat was recorded
 func (s *MemoryStore) HasChat(chatID int64) bool {
 	return s.chats[chatID]
+}
+
+// FollowMP records that chatID follows the named MP.
+func (s *MemoryStore) FollowMP(chatID int64, mp string) {
+	s.follows[chatID] = append(s.follows[chatID], mp)
+}
+
+// Follows returns the MPs that chatID follows.
+func (s *MemoryStore) Follows(chatID int64) []string {
+	return s.follows[chatID]
 }
 
 // Chats returns the recorded chat IDs
@@ -58,7 +71,8 @@ func Broadcast(msg string, store *MemoryStore) []Reply {
 
 // HandleUpdate processes an update and returns a reply
 func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
-	switch update.Text {
+	cmd, arg, _ := strings.Cut(update.Text, " ")
+	switch cmd {
 	case "/start":
 		store.AddChat(update.ChatID)
 		return Reply{
@@ -70,6 +84,12 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "Your details have been removed.",
+		}, nil
+	case "/follow":
+		store.FollowMP(update.ChatID, arg)
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "Now following " + arg + ".",
 		}, nil
 	default:
 		return Reply{

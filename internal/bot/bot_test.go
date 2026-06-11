@@ -6,6 +6,45 @@ import (
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
 
+// Slice 6: /follow <name> records that the chat follows that MP, readable back via
+// a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
+// this pins that HandleUpdate splits the command from its argument on the FIRST space
+// only — a naive whitespace split would drop the surname. Confirmation reply is
+// addressed back to the chat, non-empty, and distinct from the /start welcome.
+func TestHandleUpdate_follow_recordsNamedMP(t *testing.T) {
+	store := bot.NewMemoryStore()
+
+	// Capture the welcome behaviorally so we can assert the confirmation differs
+	// from it without hardcoding either string.
+	welcome, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/start) returned error: %v", err)
+	}
+
+	const mp = "Keir Starmer"
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/follow) returned error: %v", err)
+	}
+
+	// Assert: the named MP is recorded as a follow for this chat.
+	got := store.Follows(42)
+	if len(got) != 1 || got[0] != mp {
+		t.Fatalf("store.Follows(42) = %v, want exactly [%q]", got, mp)
+	}
+
+	// Assert: confirmation addressed back to the chat, non-empty, distinct from welcome.
+	if reply.ChatID != 42 {
+		t.Errorf("reply addressed to chat %d, want 42", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want a follow confirmation")
+	}
+	if reply.Text == welcome.Text {
+		t.Errorf("/follow got the welcome reply %q, want a distinct confirmation", reply.Text)
+	}
+}
+
 // Slice 5: Broadcast sends one reply per recorded subscriber, each addressed to
 // that chat and carrying the same message. Chats() is unsorted, so we compare the
 // replies as a set (chatID -> text), never by position.
