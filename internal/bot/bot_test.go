@@ -7,6 +7,43 @@ import (
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
 
+// fakeSource is an in-memory ActivitySource: canned activity items keyed by MP, so the
+// poll slice stays offline (real HTTP feeds arrive in Phase C).
+type fakeSource struct {
+	items map[string][]bot.Activity
+}
+
+func (f fakeSource) Activity(mp string) []bot.Activity {
+	return f.items[mp]
+}
+
+// Slice 9 (Phase D, poll loop — fan-out half): a poll over the store turns an MP's
+// activity into a reply for each chat that follows that MP. One follower, one MP, one
+// item -> one reply addressed to that chat, mentioning the activity. Detecting *new*
+// activity (not re-pushing already-sent items) is a deliberately separate behavior — the
+// next slice — so this one proves only source -> match subscribers -> broadcast.
+func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, "Keir Starmer")
+
+	source := fakeSource{items: map[string][]bot.Activity{
+		"Keir Starmer": {{ID: "v42", Text: "voted on Bill 42"}},
+	}}
+
+	replies := bot.CheckActivity(source, store)
+
+	if len(replies) != 1 {
+		t.Fatalf("got %d replies, want 1", len(replies))
+	}
+	if replies[0].ChatID != 1 {
+		t.Errorf("reply addressed to chat %d, want 1", replies[0].ChatID)
+	}
+	if !strings.Contains(replies[0].Text, "voted on Bill 42") {
+		t.Errorf("reply text %q does not mention the activity", replies[0].Text)
+	}
+}
+
 // Slice 8: /list replies with the MPs the chat follows. After following two MPs, the
 // reply is addressed back to the chat and mentions each by name. Substring checks keep
 // the exact formatting and ordering free to change. (The "follows nobody" case is a

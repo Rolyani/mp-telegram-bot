@@ -20,6 +20,19 @@ type MemoryStore struct {
 	follows map[int64][]string
 }
 
+// Activity is one item of an MP's parliamentary activity (a vote, question, or speech).
+// ID uniquely identifies the item so it can be de-duplicated; Text is what subscribers see.
+type Activity struct {
+	ID   string
+	Text string
+}
+
+// ActivitySource fetches the recent activity for a given MP. Implementations may hit the
+// Parliament APIs; tests supply an in-memory fake.
+type ActivitySource interface {
+	Activity(mp string) []Activity
+}
+
 // NewMemoryStore returns a ready to use *MemoryStore
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{chats: make(map[int64]bool), follows: make(map[int64][]string)}
@@ -65,6 +78,24 @@ func Broadcast(msg string, store *MemoryStore) []Reply {
 	replies := make([]Reply, 0, len(chats))
 	for _, id := range chats {
 		replies = append(replies, Reply{ChatID: id, Text: msg})
+	}
+	return replies
+}
+
+// CheckActivity polls the source for every followed MP and builds one reply per activity
+// item, addressed to each chat that follows that MP. It does not yet suppress
+// already-sent items — that's the next slice.
+func CheckActivity(source ActivitySource, store *MemoryStore) []Reply {
+	chats := store.Chats()
+	replies := make([]Reply, 0, len(chats))
+	for _, id := range chats {
+		follows := store.Follows(id)
+		for _, mp := range follows {
+			data := source.Activity(mp)
+			for _, act := range data {
+				replies = append(replies, Reply{ChatID: id, Text: act.Text})
+			}
+		}
 	}
 	return replies
 }
