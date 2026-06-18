@@ -151,6 +151,12 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 		}, nil
 	case "/list":
 		follows := store.Follows(update.ChatID)
+		if len(follows) == 0 {
+			return Reply{
+				ChatID: update.ChatID,
+				Text:   "You are not following any MPs yet.",
+			}, nil
+		}
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "You follow: " + strings.Join(follows, ", "),

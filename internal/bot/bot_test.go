@@ -99,6 +99,42 @@ func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
 	}
 }
 
+// Slice 11 (Phase A): /list when the chat follows nobody must NOT emit the dangling
+// "You follow: " reply (which is what strings.Join over an empty list produces today).
+// It should send a non-empty message that reads distinctly from the populated list, so a
+// brand-new user is told they follow no one rather than shown an empty list. Wording is
+// not pinned — only non-empty, and distinct from the with-follows reply.
+func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
+	store := bot.NewMemoryStore()
+
+	empty, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/list) returned error: %v", err)
+	}
+
+	if empty.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", empty.ChatID)
+	}
+	if strings.TrimSpace(empty.Text) == "" {
+		t.Errorf("empty-follows /list reply is blank, want a non-empty message")
+	}
+
+	// A chat that DOES follow someone gets the normal list reply. The no-follows reply
+	// must not merely be that list with an empty body — i.e. not a prefix of the
+	// populated reply ("You follow: " is a prefix of "You follow: Keir Starmer"). It has
+	// to be its own message, so a user following nobody isn't shown a dangling list.
+	if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow Keir Starmer"}, store); err != nil {
+		t.Fatalf("follow setup failed: %v", err)
+	}
+	populated, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/list) after follow returned error: %v", err)
+	}
+	if strings.HasPrefix(populated.Text, empty.Text) {
+		t.Errorf("no-follows reply %q is just a prefix of the with-follows reply %q (dangling empty list); want a distinct message", empty.Text, populated.Text)
+	}
+}
+
 // Slice 7: /follow with no MP name must not record an empty follow, and must reply
 // with a usage hint distinct from the success confirmation. Covers both a bare
 // "/follow" (no argument) and "/follow   " (whitespace-only argument) — the latter
