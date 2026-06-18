@@ -18,6 +18,7 @@ type Reply struct {
 type MemoryStore struct {
 	chats   map[int64]bool
 	follows map[int64][]string
+	seen    map[int64]map[string]bool
 }
 
 // Activity is one item of an MP's parliamentary activity (a vote, question, or speech).
@@ -35,7 +36,11 @@ type ActivitySource interface {
 
 // NewMemoryStore returns a ready to use *MemoryStore
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{chats: make(map[int64]bool), follows: make(map[int64][]string)}
+	return &MemoryStore{
+		chats:   make(map[int64]bool),
+		follows: make(map[int64][]string),
+		seen:    make(map[int64]map[string]bool),
+	}
 }
 
 // AddChat records a chat ID
@@ -93,11 +98,26 @@ func CheckActivity(source ActivitySource, store *MemoryStore) []Reply {
 		for _, mp := range follows {
 			data := source.Activity(mp)
 			for _, act := range data {
+				if store.WasSent(id, act.ID) {
+					continue
+				}
 				replies = append(replies, Reply{ChatID: id, Text: act.Text})
+				store.MarkSent(id, act.ID)
 			}
 		}
 	}
 	return replies
+}
+
+func (s *MemoryStore) MarkSent(ChatID int64, activityID string) {
+	if s.seen[ChatID] == nil {
+		s.seen[ChatID] = make(map[string]bool)
+	}
+	s.seen[ChatID][activityID] = true
+}
+
+func (s *MemoryStore) WasSent(ChatID int64, activityID string) bool {
+	return s.seen[ChatID][activityID]
 }
 
 // HandleUpdate processes an update and returns a reply

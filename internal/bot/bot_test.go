@@ -17,6 +17,32 @@ func (f fakeSource) Activity(mp string) []bot.Activity {
 	return f.items[mp]
 }
 
+// Slice 10 (Phase D, poll loop — newness half): polling twice must not re-push an item
+// already sent to a chat. The first CheckActivity delivers the item; the second, over the
+// same unchanged source, delivers nothing. This drives a per-chat "already sent" high-water
+// mark in the store, keyed on Activity.ID — "sent" is tracked per chat, so each follower is
+// notified of a given item exactly once. (First-follow baseline — suppressing backlog for a
+// brand-new follower — is the next slice and reuses this same machinery.)
+func TestCheckActivity_itemAlreadySent_notPushedAgain(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, "Keir Starmer")
+
+	source := fakeSource{items: map[string][]bot.Activity{
+		"Keir Starmer": {{ID: "v42", Text: "voted on Bill 42"}},
+	}}
+
+	first := bot.CheckActivity(source, store)
+	if len(first) != 1 {
+		t.Fatalf("first poll: got %d replies, want 1", len(first))
+	}
+
+	second := bot.CheckActivity(source, store)
+	if len(second) != 0 {
+		t.Errorf("second poll re-pushed %d already-sent item(s), want 0", len(second))
+	}
+}
+
 // Slice 9 (Phase D, poll loop — fan-out half): a poll over the store turns an MP's
 // activity into a reply for each chat that follows that MP. One follower, one MP, one
 // item -> one reply addressed to that chat, mentioning the activity. Detecting *new*
