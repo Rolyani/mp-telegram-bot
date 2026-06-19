@@ -63,6 +63,19 @@ func (s *MemoryStore) FollowMP(chatID int64, mp string) {
 	s.follows[chatID] = append(s.follows[chatID], mp)
 }
 
+// UnfollowMP removes mp from chatID's follow list, leaving any others intact.
+// Go has no built-in slice remove, so it filters in place: kept items are
+// appended back over the same backing array.
+func (s *MemoryStore) UnfollowMP(chatID int64, mp string) {
+	keep := s.follows[chatID][:0]
+	for _, f := range s.follows[chatID] {
+		if f != mp {
+			keep = append(keep, f)
+		}
+	}
+	s.follows[chatID] = keep
+}
+
 // Follows returns the MPs that chatID follows.
 func (s *MemoryStore) Follows(chatID int64) []string {
 	return s.follows[chatID]
@@ -109,15 +122,15 @@ func CheckActivity(source ActivitySource, store *MemoryStore) []Reply {
 	return replies
 }
 
-func (s *MemoryStore) MarkSent(ChatID int64, activityID string) {
-	if s.seen[ChatID] == nil {
-		s.seen[ChatID] = make(map[string]bool)
+func (s *MemoryStore) MarkSent(chatID int64, activityID string) {
+	if s.seen[chatID] == nil {
+		s.seen[chatID] = make(map[string]bool)
 	}
-	s.seen[ChatID][activityID] = true
+	s.seen[chatID][activityID] = true
 }
 
-func (s *MemoryStore) WasSent(ChatID int64, activityID string) bool {
-	return s.seen[ChatID][activityID]
+func (s *MemoryStore) WasSent(chatID int64, activityID string) bool {
+	return s.seen[chatID][activityID]
 }
 
 // HandleUpdate processes an update and returns a reply
@@ -149,6 +162,14 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 			ChatID: update.ChatID,
 			Text:   "Now following " + name + ".",
 		}, nil
+	case "/unfollow":
+		name := strings.TrimSpace(arg)
+		store.UnfollowMP(update.ChatID, name)
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "You have unfollowed " + name + ".",
+		}, nil
+
 	case "/list":
 		follows := store.Follows(update.ChatID)
 		if len(follows) == 0 {

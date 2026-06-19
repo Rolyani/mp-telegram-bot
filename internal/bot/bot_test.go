@@ -172,6 +172,42 @@ func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 	}
 }
 
+// Slice 12 (Phase A): /unfollow <name> removes just that MP from the chat's follow
+// list, leaving any others intact. Mirror of /follow. The chat follows two MPs, then
+// unfollows one; only the other remains. There's no built-in slice remove, so this
+// drives an UnfollowMP store method (filter into a new slice). Confirmation is
+// addressed back to the chat and non-empty; exact wording stays free.
+func TestHandleUpdate_unfollow_removesNamedMPOnly(t *testing.T) {
+	store := bot.NewMemoryStore()
+
+	const kept = "Rishi Sunak"
+	const removed = "Keir Starmer"
+	for _, mp := range []string{removed, kept} {
+		if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store); err != nil {
+			t.Fatalf("follow setup for %q failed: %v", mp, err)
+		}
+	}
+
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/unfollow " + removed}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/unfollow) returned error: %v", err)
+	}
+
+	// Assert: only the unfollowed MP is gone; the other remains.
+	got := store.Follows(42)
+	if len(got) != 1 || got[0] != kept {
+		t.Fatalf("store.Follows(42) = %v, want exactly [%q]", got, kept)
+	}
+
+	// Assert: confirmation addressed back to the chat and non-empty.
+	if reply.ChatID != 42 {
+		t.Errorf("reply addressed to chat %d, want 42", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want an unfollow confirmation")
+	}
+}
+
 // Slice 6: /follow <name> records that the chat follows that MP, readable back via
 // a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
 // this pins that HandleUpdate splits the command from its argument on the FIRST space
