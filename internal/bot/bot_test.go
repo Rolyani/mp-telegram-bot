@@ -208,6 +208,58 @@ func TestHandleUpdate_unfollow_removesNamedMPOnly(t *testing.T) {
 	}
 }
 
+// Slice 13 (Phase A): /unfollow with no MP name must not touch the chat's existing
+// follows, and must reply with a usage hint — NOT the bogus "You have unfollowed ."
+// success message it sends today. Mirror of the /follow guard (slice 7). Covers both a
+// bare "/unfollow" and a whitespace-only "/unfollow   " so the guard is pinned to trim
+// before deciding, just like /follow.
+func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
+	// Capture a real success confirmation behaviorally, then blank out the name. The
+	// confirmation embeds the name verbatim, so removing it collapses the template down
+	// to exactly the reply the empty-name case wrongly produces today ("You have
+	// unfollowed ."). Asserting the guard reply differs from that pins it as a genuine
+	// usage hint rather than a name-less "success" — and avoids hardcoding any wording.
+	const realName = "Keir Starmer"
+	confirmStore := bot.NewMemoryStore()
+	if _, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + realName}, confirmStore); err != nil {
+		t.Fatalf("follow setup for confirmation failed: %v", err)
+	}
+	confirm, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + realName}, confirmStore)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/unfollow <name>) returned error: %v", err)
+	}
+	namelessConfirm := strings.Replace(confirm.Text, realName, "", 1)
+
+	for _, text := range []string{"/unfollow", "/unfollow   "} {
+		t.Run(text, func(t *testing.T) {
+			store := bot.NewMemoryStore()
+			const followed = "Rishi Sunak"
+			if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + followed}, store); err != nil {
+				t.Fatalf("follow setup failed: %v", err)
+			}
+
+			reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: text}, store)
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
+			}
+
+			// The existing follow must be untouched — a nameless /unfollow removes nothing.
+			if got := store.Follows(7); len(got) != 1 || got[0] != followed {
+				t.Errorf("store.Follows(7) = %v, want unchanged [%q] for %q", got, followed, text)
+			}
+			if reply.ChatID != 7 {
+				t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+			}
+			if reply.Text == "" {
+				t.Errorf("reply.Text is empty, want a usage hint")
+			}
+			if reply.Text == namelessConfirm {
+				t.Errorf("got the name-less success confirmation %q, want a distinct usage hint", reply.Text)
+			}
+		})
+	}
+}
+
 // Slice 6: /follow <name> records that the chat follows that MP, readable back via
 // a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
 // this pins that HandleUpdate splits the command from its argument on the FIRST space
