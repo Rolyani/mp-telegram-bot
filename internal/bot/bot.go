@@ -164,6 +164,12 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 		}, nil
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
+		if name == "" {
+			return Reply{
+				ChatID: update.ChatID,
+				Text:   "Enter an MPs name to unfollow.",
+			}, nil
+		}
 		store.UnfollowMP(update.ChatID, name)
 		return Reply{
 			ChatID: update.ChatID,
