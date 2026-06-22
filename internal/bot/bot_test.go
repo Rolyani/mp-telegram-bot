@@ -260,6 +260,95 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 	}
 }
 
+// Slice 14 (Phase A): /unfollow <name> for an MP the chat does NOT follow is a no-op
+// and must not falsely claim a removal happened. The SAME name is used in both arms so
+// the only variable is followed-vs-not, not the name (slice 13's lesson): a chat that
+// really follows the MP gets the success confirmation; a chat that never followed them
+// must get a DIFFERENT reply. This drives UnfollowMP to report whether it actually
+// removed anything — today it silently filters and the handler always claims success.
+func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
+	const mp = "Keir Starmer"
+
+	// Arm A: chat genuinely follows mp, then unfollows — capture the real success reply.
+	following := bot.NewMemoryStore()
+	if _, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + mp}, following); err != nil {
+		t.Fatalf("follow setup failed: %v", err)
+	}
+	success, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + mp}, following)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/unfollow followed) returned error: %v", err)
+	}
+
+	// Arm B: chat follows someone ELSE, then unfollows mp it never followed.
+	store := bot.NewMemoryStore()
+	const other = "Rishi Sunak"
+	if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + other}, store); err != nil {
+		t.Fatalf("follow setup failed: %v", err)
+	}
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/unfollow " + mp}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/unfollow unknown) returned error: %v", err)
+	}
+
+	// No-op: the unrelated follow is left untouched.
+	if got := store.Follows(7); len(got) != 1 || got[0] != other {
+		t.Errorf("store.Follows(7) = %v, want unchanged [%q]", got, other)
+	}
+	if reply.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want a 'not following them' message")
+	}
+	// Same name in both arms, so an identical reply can only mean the handler claimed a
+	// removal that never happened.
+	if reply.Text == success.Text {
+		t.Errorf("unknown-name /unfollow reply %q equals the real success confirmation; want a distinct 'you weren't following them' message", reply.Text)
+	}
+}
+
+// Slice 14b (Phase A): /unfollow an MP the chat follows AMONG OTHERS must report
+// success — it WAS removed — and reply with the success confirmation, not the "weren't
+// following them" message. Pins UnfollowMP's bool to mean "did mp get removed?", not
+// "did the list become empty / contain only mp". Reference success reply is captured
+// from a chat that follows ONLY the target, so the two replies must match.
+func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
+	const target = "Keir Starmer"
+	const other = "Rishi Sunak"
+
+	// Reference: the success confirmation when the chat follows ONLY the target.
+	solo := bot.NewMemoryStore()
+	if _, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + target}, solo); err != nil {
+		t.Fatalf("solo follow setup failed: %v", err)
+	}
+	success, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + target}, solo)
+	if err != nil {
+		t.Fatalf("solo unfollow failed: %v", err)
+	}
+
+	// The chat under test follows the target AND someone else, then unfollows the target.
+	store := bot.NewMemoryStore()
+	for _, mp := range []string{target, other} {
+		if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + mp}, store); err != nil {
+			t.Fatalf("follow setup for %q failed: %v", mp, err)
+		}
+	}
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/unfollow " + target}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/unfollow) returned error: %v", err)
+	}
+
+	// The target is gone, the other remains.
+	if got := store.Follows(7); len(got) != 1 || got[0] != other {
+		t.Fatalf("store.Follows(7) = %v, want exactly [%q]", got, other)
+	}
+	// The target WAS removed, so the reply must be the success confirmation — identical
+	// to the solo case (same name, removal genuinely happened in both).
+	if reply.Text != success.Text {
+		t.Errorf("reply %q, want the success confirmation %q (the MP was actually removed)", reply.Text, success.Text)
+	}
+}
+
 // Slice 6: /follow <name> records that the chat follows that MP, readable back via
 // a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
 // this pins that HandleUpdate splits the command from its argument on the FIRST space
