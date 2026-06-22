@@ -66,14 +66,18 @@ func (s *MemoryStore) FollowMP(chatID int64, mp string) {
 // UnfollowMP removes mp from chatID's follow list, leaving any others intact.
 // Go has no built-in slice remove, so it filters in place: kept items are
 // appended back over the same backing array.
-func (s *MemoryStore) UnfollowMP(chatID int64, mp string) {
+func (s *MemoryStore) UnfollowMP(chatID int64, mp string) bool {
 	keep := s.follows[chatID][:0]
+	removed := false
 	for _, f := range s.follows[chatID] {
 		if f != mp {
 			keep = append(keep, f)
+		} else {
+			removed = true
 		}
 	}
 	s.follows[chatID] = keep
+	return removed
 }
 
 // Follows returns the MPs that chatID follows.
@@ -170,7 +174,13 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 				Text:   "Enter an MPs name to unfollow.",
 			}, nil
 		}
-		store.UnfollowMP(update.ChatID, name)
+		removed := store.UnfollowMP(update.ChatID, name)
+		if removed == false {
+			return Reply{
+				ChatID: update.ChatID,
+				Text:   "You were not following this MP.",
+			}, nil
+		}
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "You have unfollowed " + name + ".",
