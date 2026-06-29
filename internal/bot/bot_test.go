@@ -349,6 +349,48 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 	}
 }
 
+// Slice 15 (Phase A): /forgetme wipes EVERYTHING the bot holds for a chat — its
+// subscription AND its entire follow list — in one command, then confirms. This is more
+// than /stop (which only unsubscribes, leaving follows behind): the chat under test both
+// subscribed and follows two MPs, so a minimal "just unsubscribe" implementation leaves
+// the follows and fails. Asserting on both the chat record and the follow list forces a
+// store method that clears the two together. Confirmation is addressed back to the chat
+// and non-empty; wording stays free.
+func TestHandleUpdate_forgetme_wipesSubscriptionAndFollows(t *testing.T) {
+	store := bot.NewMemoryStore()
+
+	// The chat is fully present: subscribed via /start and following two MPs.
+	if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}, store); err != nil {
+		t.Fatalf("/start setup failed: %v", err)
+	}
+	for _, mp := range []string{"Keir Starmer", "Rishi Sunak"} {
+		if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store); err != nil {
+			t.Fatalf("follow setup for %q failed: %v", mp, err)
+		}
+	}
+
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/forgetme"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/forgetme) returned error: %v", err)
+	}
+
+	// Both halves must be gone: no longer a recorded chat, and no follows remain.
+	if store.HasChat(42) {
+		t.Errorf("chat 42 still recorded after /forgetme, want it removed")
+	}
+	if got := store.Follows(42); len(got) != 0 {
+		t.Errorf("store.Follows(42) = %v after /forgetme, want nothing", got)
+	}
+
+	// Confirmation addressed back to the chat and non-empty.
+	if reply.ChatID != 42 {
+		t.Errorf("reply addressed to chat %d, want 42", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want a confirmation message")
+	}
+}
+
 // Slice 6: /follow <name> records that the chat follows that MP, readable back via
 // a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
 // this pins that HandleUpdate splits the command from its argument on the FIRST space
