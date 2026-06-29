@@ -126,6 +126,13 @@ func CheckActivity(source ActivitySource, store *MemoryStore) []Reply {
 	return replies
 }
 
+// ForgetChat removes the chat's subscription and its entire follow list. It does not
+// yet clear the per-chat already-sent set (s.seen) — that's a separate behavior.
+func (s *MemoryStore) ForgetChat(chatID int64) {
+	delete(s.follows, chatID)
+	delete(s.chats, chatID)
+}
+
 func (s *MemoryStore) MarkSent(chatID int64, activityID string) {
 	if s.seen[chatID] == nil {
 		s.seen[chatID] = make(map[string]bool)
@@ -197,6 +204,12 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "You follow: " + strings.Join(follows, ", "),
+		}, nil
+	case "/forgetme":
+		store.ForgetChat(update.ChatID)
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "Your follows and account have been removed.",
 		}, nil
 	default:
 		return Reply{
