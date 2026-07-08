@@ -546,6 +546,35 @@ func TestHandleUpdate_unknownMessage_notRecordedAndDistinctReply(t *testing.T) {
 	}
 }
 
+// Slice 16 (Phase A, static commands): /help returns a reply addressed to the chat with
+// its own help text. The point of the slice is that /help is genuinely dispatched to its
+// own case, not swallowed by the default fallback — so we capture the default reply
+// behaviorally (via an unrecognized command) and assert /help differs from it, rather than
+// hardcoding the fallback string.
+func TestHandleUpdate_help_repliesWithHelpTextDistinctFromDefault(t *testing.T) {
+	// Establish the default fallback behaviorally rather than hardcoding its text.
+	fallback, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"}, bot.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("HandleUpdate(unknown) returned error: %v", err)
+	}
+
+	store := bot.NewMemoryStore()
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/help"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/help) returned error: %v", err)
+	}
+
+	if reply.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want help text")
+	}
+	if reply.Text == fallback.Text {
+		t.Errorf("/help got the default fallback reply %q, want distinct help text", reply.Text)
+	}
+}
+
 // Slice 1: an incoming /start update should be recorded in the subscriber store
 // and produce a welcome reply addressed back to the same chat.
 func TestHandleUpdate(t *testing.T) {

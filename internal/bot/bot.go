@@ -205,6 +205,13 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 			ChatID: update.ChatID,
 			Text:   "You follow: " + strings.Join(follows, ", "),
 		}, nil
+	case "/help":
+		return Reply{
+			ChatID: update.ChatID,
+			Text: "Follow MPs by typing their name or the post code into /follow.\n" +
+				"/start will look for the last activity for the followed MPs.\n" +
+				"/forgetme will wipe all of your data.",
+		}, nil
 	case "/forgetme":
 		store.ForgetChat(update.ChatID)
 		return Reply{
