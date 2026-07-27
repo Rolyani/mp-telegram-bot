@@ -1,6 +1,9 @@
 package bot_test
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -15,6 +18,43 @@ type fakeSource struct {
 
 func (f fakeSource) Activity(mp string) []bot.Activity {
 	return f.items[mp]
+}
+
+// Slice B1 (Phase B, the HTTP seam): given the Members API's search JSON for a name, the
+// resolver returns that MP's durable member ID. This is the first network slice, and the
+// behavior forces the whole seam into existence: a Resolver with an INJECTABLE base URL
+// (pointed at an httptest.Server here, the real members-api.parliament.uk in production),
+// a real *http.Client making the request, and tolerant JSON parsing of the nested shape
+// the API actually returns — the id lives at items[].value.id, so this drives explicit
+// json:"" tags on per-level structs. Seam decision (httptest over a mocked client) is
+// documented in docs/ARCHITECTURE.md. We assert BOTH facets of "resolve BY name": the
+// server was queried with the name (proving URL/query construction, the reason we chose
+// httptest — a faked client would let a wrong URL pass), and the parsed id comes back.
+func TestResolver_ResolveName_returnsMemberID(t *testing.T) {
+	// Fake Members API: capture the outgoing Name query, then return canned search JSON
+	// in the real API's nested shape. The handler runs during ResolveName's blocking HTTP
+	// call and completes before it returns, so reading gotName afterwards is safe.
+	var gotName string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotName = r.URL.Query().Get("Name")
+		fmt.Fprint(w, `{"items":[{"value":{"id":4514,"nameDisplayAs":"Keir Starmer"}}]}`)
+	}))
+	defer srv.Close()
+
+	resolver := bot.NewResolver(srv.URL)
+	id, err := resolver.ResolveName("Keir Starmer")
+	if err != nil {
+		t.Fatalf("ResolveName returned error: %v", err)
+	}
+
+	// Queried by name — proves the request was built from the argument, not a constant.
+	if gotName != "Keir Starmer" {
+		t.Errorf("resolver queried Name=%q, want %q", gotName, "Keir Starmer")
+	}
+	// Parsed the member ID out of the nested items[].value.id shape.
+	if id != 4514 {
+		t.Errorf("ResolveName = %d, want 4514", id)
+	}
 }
 
 // Slice 10 (Phase D, poll loop — newness half): polling twice must not re-push an item
