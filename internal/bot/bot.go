@@ -224,6 +224,11 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 			Text: "This bot only stores the MPs you select. No other personal information is collected.\n" +
 				"The /forgetme command will wipe all of the data stored for your ID",
 		}, nil
+	case "/source":
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "Full code available at: https://github.com/Rolyani/mp-telegram-bot",
+		}, nil
 	default:
 		return Reply{
 			ChatID: update.ChatID,
