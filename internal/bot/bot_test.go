@@ -604,6 +604,35 @@ func TestHandleUpdate_privacy_repliesWithPrivacyTextDistinctFromDefault(t *testi
 	}
 }
 
+// Slice 18 (Phase A, static commands — last one): /source returns a reply addressed to
+// the chat with its own text (e.g. a link to the project's source). Like /help (slice 16)
+// and /privacy (slice 17), the point is that /source is genuinely dispatched to its OWN
+// case, not swallowed by the default fallback — so we capture the default reply
+// behaviorally and assert /source differs from it, rather than hardcoding wording.
+func TestHandleUpdate_source_repliesWithSourceTextDistinctFromDefault(t *testing.T) {
+	// Establish the default fallback behaviorally rather than hardcoding its text.
+	fallback, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"}, bot.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("HandleUpdate(unknown) returned error: %v", err)
+	}
+
+	store := bot.NewMemoryStore()
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/source"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/source) returned error: %v", err)
+	}
+
+	if reply.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want source text")
+	}
+	if reply.Text == fallback.Text {
+		t.Errorf("/source got the default fallback reply %q, want distinct source text", reply.Text)
+	}
+}
+
 // Slice 1: an incoming /start update should be recorded in the subscriber store
 // and produce a welcome reply addressed back to the same chat.
 func TestHandleUpdate(t *testing.T) {
