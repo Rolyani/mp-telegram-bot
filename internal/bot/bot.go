@@ -218,6 +218,12 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 			ChatID: update.ChatID,
 			Text:   "Your follows and account have been removed.",
 		}, nil
+	case "/privacy":
+		return Reply{
+			ChatID: update.ChatID,
+			Text: "This bot only stores the MPs you select. No other personal information is collected.\n" +
+				"The /forgetme command will wipe all of the data stored for your ID",
+		}, nil
 	default:
 		return Reply{
 			ChatID: update.ChatID,
