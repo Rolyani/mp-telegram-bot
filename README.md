@@ -77,6 +77,11 @@ sees their chat).
   only each `chat_id` → followed MP(s), plus which activity items have already been sent.
 - **Deployment:** GitOps with Flux from a **public** repo. Bot token is kept out of git
   via a SOPS-encrypted Secret; CNPG credentials live entirely in-cluster.
+- **Testing the HTTP seam:** Parliament clients take a real `*http.Client` with an
+  injectable base URL and are tested against an `httptest.Server` returning canned JSON,
+  rather than a mocked client interface — so query construction *and* parsing are covered
+  while the suite stays offline. Rationale and when to revisit (an `http.RoundTripper` for
+  auth/retry middleware) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#design-decision-testing-the-http-seam).
 
 Two critical deployment gotchas follow from the design: **run exactly one replica**
 (Telegram allows only one active `getUpdates` poll per token — a second gets
