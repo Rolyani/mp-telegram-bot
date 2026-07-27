@@ -575,6 +575,35 @@ func TestHandleUpdate_help_repliesWithHelpTextDistinctFromDefault(t *testing.T) 
 	}
 }
 
+// Slice 17 (Phase A, static commands): /privacy returns a reply addressed to the chat
+// with its own privacy text. Like /help (slice 16), the point is that /privacy is
+// genuinely dispatched to its OWN case, not swallowed by the default fallback — so we
+// capture the default reply behaviorally (via an unrecognized command) and assert
+// /privacy differs from it, rather than hardcoding the fallback string. Wording is free.
+func TestHandleUpdate_privacy_repliesWithPrivacyTextDistinctFromDefault(t *testing.T) {
+	// Establish the default fallback behaviorally rather than hardcoding its text.
+	fallback, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"}, bot.NewMemoryStore())
+	if err != nil {
+		t.Fatalf("HandleUpdate(unknown) returned error: %v", err)
+	}
+
+	store := bot.NewMemoryStore()
+	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/privacy"}, store)
+	if err != nil {
+		t.Fatalf("HandleUpdate(/privacy) returned error: %v", err)
+	}
+
+	if reply.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+	}
+	if reply.Text == "" {
+		t.Errorf("reply.Text is empty, want privacy text")
+	}
+	if reply.Text == fallback.Text {
+		t.Errorf("/privacy got the default fallback reply %q, want distinct privacy text", reply.Text)
+	}
+}
+
 // Slice 1: an incoming /start update should be recorded in the subscriber store
 // and produce a welcome reply addressed back to the same chat.
 func TestHandleUpdate(t *testing.T) {
