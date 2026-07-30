@@ -57,6 +57,33 @@ func TestResolver_ResolveName_returnsMemberID(t *testing.T) {
 	}
 }
 
+// Slice B1b (Phase B, the HTTP seam — the sad path B1 deliberately deferred): a name that
+// matches no MP comes back from the real Members API as a well-formed 200 with an EMPTY
+// items array. That is a normal answer, not a transport failure, so the resolver must report
+// it as an error the caller can act on ("no MP found") rather than reaching for items[0] and
+// panicking. A panic here would be the worst kind of failure: it isn't recoverable at the
+// call site, and in the poll loop it would take the whole bot down over one typo'd /follow.
+func TestResolver_ResolveName_unknownName_returnsErrorNotPanic(t *testing.T) {
+	// Fake Members API answering the way it really does for a no-match search: 200 OK,
+	// valid JSON, zero items. Nothing is malformed — the emptiness IS the response.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[]}`)
+	}))
+	defer srv.Close()
+
+	resolver := bot.NewResolver(srv.URL)
+	id, err := resolver.ResolveName("Nobody McNobody")
+
+	// The whole point of the slice: an error, not a crash.
+	if err == nil {
+		t.Fatalf("ResolveName of an unknown name returned no error (id %d), want an error", id)
+	}
+	// And no bogus member ID smuggled out alongside the error — 0 is nobody.
+	if id != 0 {
+		t.Errorf("ResolveName = %d alongside error %v, want 0", id, err)
+	}
+}
+
 // Slice 10 (Phase D, poll loop — newness half): polling twice must not re-push an item
 // already sent to a chat. The first CheckActivity delivers the item; the second, over the
 // same unchanged source, delivers nothing. This drives a per-chat "already sent" high-water
