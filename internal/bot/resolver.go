@@ -2,6 +2,7 @@ package bot
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 )
@@ -36,6 +37,10 @@ func (r *Resolver) ResolveName(name string) (int, error) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return 0, err
+	}
+
+	if len(payload.Items) == 0 {
+		return 0, fmt.Errorf("no MP found for %q", name)
 	}
 
 	return payload.Items[0].Value.ID, nil
