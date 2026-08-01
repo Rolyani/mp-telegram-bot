@@ -43,7 +43,7 @@ func TestResolver_ResolveName_returnsMemberID(t *testing.T) {
 	defer srv.Close()
 
 	resolver := bot.NewResolver(srv.URL)
-	id, err := resolver.ResolveName("Keir Starmer")
+	members, err := resolver.ResolveName("Keir Starmer")
 	if err != nil {
 		t.Fatalf("ResolveName returned error: %v", err)
 	}
@@ -52,19 +52,26 @@ func TestResolver_ResolveName_returnsMemberID(t *testing.T) {
 	if gotName != "Keir Starmer" {
 		t.Errorf("resolver queried Name=%q, want %q", gotName, "Keir Starmer")
 	}
+	// One match in, one member out.
+	if len(members) != 1 {
+		t.Fatalf("ResolveName returned %d members, want 1", len(members))
+	}
 	// Parsed the member ID out of the nested items[].value.id shape.
-	if id != 4514 {
-		t.Errorf("ResolveName = %d, want 4514", id)
+	if members[0].ID != 4514 {
+		t.Errorf("member ID = %d, want 4514", members[0].ID)
 	}
 }
 
 // Slice B1b (Phase B, the HTTP seam — the sad path B1 deliberately deferred): a name that
 // matches no MP comes back from the real Members API as a well-formed 200 with an EMPTY
-// items array. That is a normal answer, not a transport failure, so the resolver must report
-// it as an error the caller can act on ("no MP found") rather than reaching for items[0] and
-// panicking. A panic here would be the worst kind of failure: it isn't recoverable at the
-// call site, and in the poll loop it would take the whole bot down over one typo'd /follow.
-func TestResolver_ResolveName_unknownName_returnsErrorNotPanic(t *testing.T) {
+// items array. The original guarantee stands unchanged — the resolver must not reach for
+// items[0] and panic, which in the poll loop would take the whole bot down over one typo'd
+// /follow. What changed in B4 is how "none" is REPORTED: now that the resolver returns a
+// slice, zero matches is simply an empty one, not an error. A well-formed 200 saying "nobody
+// is called that" is a successful answer to a reasonable question, so errors are reserved for
+// requests that genuinely failed (transport, non-200, unparseable body). The user-facing
+// "no MP found" wording moves up to the caller, which is where phrasing belongs.
+func TestResolver_ResolveName_unknownName_returnsNoMembersNotError(t *testing.T) {
 	// Fake Members API answering the way it really does for a no-match search: 200 OK,
 	// valid JSON, zero items. Nothing is malformed — the emptiness IS the response.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,15 +80,15 @@ func TestResolver_ResolveName_unknownName_returnsErrorNotPanic(t *testing.T) {
 	defer srv.Close()
 
 	resolver := bot.NewResolver(srv.URL)
-	id, err := resolver.ResolveName("Nobody McNobody")
+	members, err := resolver.ResolveName("Nobody McNobody")
 
-	// The whole point of the slice: an error, not a crash.
-	if err == nil {
-		t.Fatalf("ResolveName of an unknown name returned no error (id %d), want an error", id)
+	// A successful request that found nobody is not a failure.
+	if err != nil {
+		t.Fatalf("ResolveName of an unknown name returned error %v, want nil", err)
 	}
-	// And no bogus member ID smuggled out alongside the error — 0 is nobody.
-	if id != 0 {
-		t.Errorf("ResolveName = %d alongside error %v, want 0", id, err)
+	// The original point of the slice: no members, and critically no panic on items[0].
+	if len(members) != 0 {
+		t.Errorf("ResolveName returned %d members, want 0", len(members))
 	}
 }
 
@@ -105,19 +112,20 @@ func TestResolver_ResolveName_apiReturnsNon200_errorNamesTheStatus(t *testing.T)
 	defer srv.Close()
 
 	resolver := bot.NewResolver(srv.URL)
-	id, err := resolver.ResolveName("Keir Starmer")
+	members, err := resolver.ResolveName("Keir Starmer")
 
 	if err == nil {
-		t.Fatalf("ResolveName against a 500 returned no error (id %d), want an error", id)
+		t.Fatalf("ResolveName against a 500 returned no error (%d members), want an error", len(members))
 	}
 	// The diagnosis must be in the message: someone reading a log needs to see that the API
 	// rejected us, not that some JSON looked odd.
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("ResolveName error = %q, want it to mention the 500 status", err)
 	}
-	// Same guarantee as B1b: no bogus member ID rides along with a failure.
-	if id != 0 {
-		t.Errorf("ResolveName = %d alongside error %v, want 0", id, err)
+	// No half-answer rides along with a failure — this is the distinction B1b now rests on,
+	// so a failed request must be empty, not merely "probably empty".
+	if len(members) != 0 {
+		t.Errorf("ResolveName returned %d members alongside error %v, want 0", len(members), err)
 	}
 }
 
@@ -154,6 +162,52 @@ func TestResolver_ResolveName_queriesOnlySittingCommonsMembers(t *testing.T) {
 	// Sitting members only — excludes former and deceased members.
 	if got := gotQuery.Get("IsCurrentMember"); got != "true" {
 		t.Errorf("resolver queried IsCurrentMember=%q, want %q", got, "true")
+	}
+}
+
+// Slice B4 (Phase B, the HTTP seam — ambiguity): the Members API matches a name as a
+// SUBSTRING anywhere in the full name, so common surnames match many sitting MPs at once —
+// the live API returns 11 for "Smith", including Connor Naismith, whose surname merely
+// CONTAINS it. Ambiguity therefore cannot be filtered away (B3 already narrowed this from 52),
+// and silently taking items[0] would attach a user to an arbitrary Smith with no way of
+// knowing. So the resolver stops deciding: it returns EVERY match and lets the caller present
+// them for disambiguation. That is what turns ResolveName plural, and it also drives a named
+// Member type — a bare []int could not carry the names a chooser has to display.
+func TestResolver_ResolveName_multipleMatches_returnsThemAll(t *testing.T) {
+	// Fake Members API returning three sitting Smiths, in the real nested shape. The third is
+	// a Naismith: proof the resolver must not try to second-guess the API's matching by
+	// filtering results itself — it has no better rule available than the API's own.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"items":[
+			{"value":{"id":4471,"nameDisplayAs":"Cat Smith"}},
+			{"value":{"id":5090,"nameDisplayAs":"Greg Smith"}},
+			{"value":{"id":5399,"nameDisplayAs":"Connor Naismith"}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	resolver := bot.NewResolver(srv.URL)
+	members, err := resolver.ResolveName("Smith")
+	if err != nil {
+		t.Fatalf("ResolveName returned error: %v", err)
+	}
+
+	// Every match survives — none dropped, none invented.
+	if len(members) != 3 {
+		t.Fatalf("ResolveName returned %d members, want all 3", len(members))
+	}
+
+	// Each match keeps BOTH its ID and its display name, in the order the API gave them.
+	// The name is not decoration: it is the only thing that lets a user tell these apart.
+	want := []bot.Member{
+		{ID: 4471, Name: "Cat Smith"},
+		{ID: 5090, Name: "Greg Smith"},
+		{ID: 5399, Name: "Connor Naismith"},
+	}
+	for i, w := range want {
+		if members[i] != w {
+			t.Errorf("members[%d] = %+v, want %+v", i, members[i], w)
+		}
 	}
 }
 
