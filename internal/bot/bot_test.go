@@ -84,6 +84,42 @@ func TestResolver_ResolveName_unknownName_returnsErrorNotPanic(t *testing.T) {
 	}
 }
 
+// Slice B2 (Phase B, the HTTP seam — transport failures): when the Members API is down or
+// rate-limiting us it answers with a non-200 and, typically, an HTML error page rather than
+// JSON. Today the resolver ignores resp.StatusCode entirely and feeds that HTML straight to
+// the JSON decoder, so an outage surfaces as `invalid character '<' looking for beginning of
+// value` — an error that describes our parser's confusion instead of the actual fault. The
+// status IS the diagnosis and it must reach the caller, so the error has to name it.
+//
+// Note this slice cannot assert merely "err != nil": the decode already fails today. What is
+// missing is a USEFUL error, so the assertion pins the actionable part — the status code —
+// while leaving the surrounding wording free.
+func TestResolver_ResolveName_apiReturnsNon200_errorNamesTheStatus(t *testing.T) {
+	// Fake Members API mid-outage: a 500 whose body is an HTML error page, exactly the shape
+	// that makes the current failure so baffling.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `<html><body>500 Internal Server Error</body></html>`)
+	}))
+	defer srv.Close()
+
+	resolver := bot.NewResolver(srv.URL)
+	id, err := resolver.ResolveName("Keir Starmer")
+
+	if err == nil {
+		t.Fatalf("ResolveName against a 500 returned no error (id %d), want an error", id)
+	}
+	// The diagnosis must be in the message: someone reading a log needs to see that the API
+	// rejected us, not that some JSON looked odd.
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("ResolveName error = %q, want it to mention the 500 status", err)
+	}
+	// Same guarantee as B1b: no bogus member ID rides along with a failure.
+	if id != 0 {
+		t.Errorf("ResolveName = %d alongside error %v, want 0", id, err)
+	}
+}
+
 // Slice 10 (Phase D, poll loop — newness half): polling twice must not re-push an item
 // already sent to a chat. The first CheckActivity delivers the item; the second, over the
 // same unchanged source, delivers nothing. This drives a per-chat "already sent" high-water

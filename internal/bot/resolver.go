@@ -28,6 +28,10 @@ func (r *Resolver) ResolveName(name string) (int, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("members API returned %s", resp.Status)
+	}
+
 	var payload struct {
 		Items []struct {
 			Value struct {
