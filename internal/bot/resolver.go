@@ -12,6 +12,13 @@ type Resolver struct {
 	client  *http.Client
 }
 
+// Member is one MP as the bot cares about them: a durable ID to follow activity by, and the
+// display name a user needs in order to tell two similarly-named MPs apart.
+type Member struct {
+	ID   int
+	Name string
+}
+
 func NewResolver(baseURL string) *Resolver {
 	return &Resolver{
 		baseURL: baseURL,
@@ -19,7 +26,7 @@ func NewResolver(baseURL string) *Resolver {
 	}
 }
 
-func (r *Resolver) ResolveName(name string) (int, error) {
+func (r *Resolver) ResolveName(name string) ([]Member, error) {
 	// Constrain the search to sitting Commons members: the API otherwise searches both
 	// houses and all time, returning peers and former members who have no activity to follow.
 	values := url.Values{}
@@ -31,28 +38,37 @@ func (r *Resolver) ResolveName(name string) (int, error) {
 
 	resp, err := r.client.Get(endpoint)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("members API returned %s", resp.Status)
+		return nil, fmt.Errorf("members API returned %s", resp.Status)
 	}
 
 	var payload struct {
 		Items []struct {
 			Value struct {
-				ID int `json:"id"`
+				ID            int    `json:"id"`
+				NameDisplayAs string `json:"nameDisplayAs"`
 			} `json:"value"`
 		} `json:"items"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	if len(payload.Items) == 0 {
-		return 0, fmt.Errorf("no MP found for %q", name)
+	// Translate the API's wire shape into our own, one match per item. Every match is kept:
+	// the API matches a name as a substring anywhere in the full name, so a common surname
+	// legitimately returns several sitting MPs and the resolver has no better rule than the
+	// API's for picking between them. Choosing is the caller's job, not ours.
+	var members []Member
+	for _, item := range payload.Items {
+		members = append(members, Member{
+			ID:   item.Value.ID,
+			Name: item.Value.NameDisplayAs,
+		})
 	}
 
-	return payload.Items[0].Value.ID, nil
+	return members, nil
 }
