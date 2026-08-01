@@ -20,7 +20,14 @@ func NewResolver(baseURL string) *Resolver {
 }
 
 func (r *Resolver) ResolveName(name string) (int, error) {
-	endpoint := r.baseURL + "/api/Members/Search?Name=" + url.QueryEscape(name)
+	// Constrain the search to sitting Commons members: the API otherwise searches both
+	// houses and all time, returning peers and former members who have no activity to follow.
+	values := url.Values{}
+	values.Set("Name", name)
+	values.Set("House", "1") // 1 = Commons, 2 = Lords
+	values.Set("IsCurrentMember", "true")
+
+	endpoint := r.baseURL + "/api/Members/Search?" + values.Encode()
 
 	resp, err := r.client.Get(endpoint)
 	if err != nil {
