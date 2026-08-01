@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -81,6 +82,78 @@ func TestResolver_ResolveName_unknownName_returnsErrorNotPanic(t *testing.T) {
 	// And no bogus member ID smuggled out alongside the error — 0 is nobody.
 	if id != 0 {
 		t.Errorf("ResolveName = %d alongside error %v, want 0", id, err)
+	}
+}
+
+// Slice B2 (Phase B, the HTTP seam — transport failures): when the Members API is down or
+// rate-limiting us it answers with a non-200 and, typically, an HTML error page rather than
+// JSON. Today the resolver ignores resp.StatusCode entirely and feeds that HTML straight to
+// the JSON decoder, so an outage surfaces as `invalid character '<' looking for beginning of
+// value` — an error that describes our parser's confusion instead of the actual fault. The
+// status IS the diagnosis and it must reach the caller, so the error has to name it.
+//
+// Note this slice cannot assert merely "err != nil": the decode already fails today. What is
+// missing is a USEFUL error, so the assertion pins the actionable part — the status code —
+// while leaving the surrounding wording free.
+func TestResolver_ResolveName_apiReturnsNon200_errorNamesTheStatus(t *testing.T) {
+	// Fake Members API mid-outage: a 500 whose body is an HTML error page, exactly the shape
+	// that makes the current failure so baffling.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `<html><body>500 Internal Server Error</body></html>`)
+	}))
+	defer srv.Close()
+
+	resolver := bot.NewResolver(srv.URL)
+	id, err := resolver.ResolveName("Keir Starmer")
+
+	if err == nil {
+		t.Fatalf("ResolveName against a 500 returned no error (id %d), want an error", id)
+	}
+	// The diagnosis must be in the message: someone reading a log needs to see that the API
+	// rejected us, not that some JSON looked odd.
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("ResolveName error = %q, want it to mention the 500 status", err)
+	}
+	// Same guarantee as B1b: no bogus member ID rides along with a failure.
+	if id != 0 {
+		t.Errorf("ResolveName = %d alongside error %v, want 0", id, err)
+	}
+}
+
+// Slice B3 (Phase B, the HTTP seam — asking the right question): the Members API searches
+// BOTH houses and ALL time, so an unfiltered ?Name= search returns peers and long-dead
+// members alongside sitting MPs. Probing the live API for "Smith" returns 52 matches, led by
+// Lord Booth-Smith (a peer) and Alick Buchanan-Smith (an MP who died in 1991). This bot
+// follows PARLIAMENTARY ACTIVITY, which neither of those can ever produce, so resolving to
+// one silently subscribes a user to permanent silence. Constraining the search to sitting
+// Commons members is therefore part of asking the question correctly, not an optimisation —
+// and it cuts "Smith" from 52 matches to 11 before the ambiguity slice has to deal with it.
+//
+// House=1 is the Commons (2 is the Lords). Both parameter names are case-sensitive.
+func TestResolver_ResolveName_queriesOnlySittingCommonsMembers(t *testing.T) {
+	// Fake Members API capturing the whole outgoing query, so the test can assert on the
+	// filters as well as the name. Body is a valid single-match response: this slice is about
+	// the REQUEST, so the response stays boring on purpose.
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		fmt.Fprint(w, `{"items":[{"value":{"id":4514,"nameDisplayAs":"Keir Starmer"}}]}`)
+	}))
+	defer srv.Close()
+
+	resolver := bot.NewResolver(srv.URL)
+	if _, err := resolver.ResolveName("Keir Starmer"); err != nil {
+		t.Fatalf("ResolveName returned error: %v", err)
+	}
+
+	// Commons only — excludes peers, who have no Commons activity to report.
+	if got := gotQuery.Get("House"); got != "1" {
+		t.Errorf("resolver queried House=%q, want %q (the Commons)", got, "1")
+	}
+	// Sitting members only — excludes former and deceased members.
+	if got := gotQuery.Get("IsCurrentMember"); got != "true" {
+		t.Errorf("resolver queried IsCurrentMember=%q, want %q", got, "true")
 	}
 }
 
