@@ -34,6 +34,29 @@ type ActivitySource interface {
 	Activity(mp string) []Activity
 }
 
+// NameResolver looks up sitting MPs by name, returning every match so the caller can offer
+// a choice. *Resolver satisfies this against the live Members API; tests supply an
+// in-memory fake. It is declared here, next to the code that needs it rather than beside
+// the code that implements it, so the resolver stays unaware of the bot entirely.
+type NameResolver interface {
+	ResolveName(name string) ([]Member, error)
+}
+
+// Bot holds the collaborators a command handler needs. Commands are answered by methods on
+// Bot rather than free functions so that dependencies arrive as fields: /find needs a name
+// resolver and /latest will need an activity source, and neither should become another
+// parameter on every call site.
+type Bot struct {
+	store    *MemoryStore
+	resolver NameResolver
+}
+
+// New returns a Bot that records subscriptions and follows in store, and looks MPs up
+// through resolver. Commands that touch neither work with a nil resolver.
+func New(store *MemoryStore, resolver NameResolver) *Bot {
+	return &Bot{store: store, resolver: resolver}
+}
+
 // NewMemoryStore returns a ready to use *MemoryStore
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
@@ -145,20 +168,33 @@ func (s *MemoryStore) WasSent(chatID int64, activityID string) bool {
 }
 
 // HandleUpdate processes an update and returns a reply
-func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
+func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	cmd, arg, _ := strings.Cut(update.Text, " ")
 	switch cmd {
 	case "/start":
-		store.AddChat(update.ChatID)
+		b.store.AddChat(update.ChatID)
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "Welcome! Send /start to get going.",
 		}, nil
 	case "/stop":
-		store.RemoveChat(update.ChatID)
+		b.store.RemoveChat(update.ChatID)
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "Your details have been removed.",
+		}, nil
+	case "/find":
+		members, err := b.resolver.ResolveName(arg)
+		if err != nil {
+			return Reply{}, err
+		}
+		var names []string
+		for _, m := range members {
+			names = append(names, m.Name)
+		}
+		return Reply{
+			ChatID: update.ChatID,
+			Text:   "Found: " + strings.Join(names, ", "),
 		}, nil
 	case "/follow":
 		name := strings.TrimSpace(arg)
@@ -168,7 +204,7 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 				Text:   "You must enter a name.",
 			}, nil
 		}
-		store.FollowMP(update.ChatID, name)
+		b.store.FollowMP(update.ChatID, name)
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "Now following " + name + ".",
@@ -181,7 +217,7 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 				Text:   "Enter an MPs name to unfollow.",
 			}, nil
 		}
-		removed := store.UnfollowMP(update.ChatID, name)
+		removed := b.store.UnfollowMP(update.ChatID, name)
 		if removed == false {
 			return Reply{
 				ChatID: update.ChatID,
@@ -194,7 +230,7 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 		}, nil
 
 	case "/list":
-		follows := store.Follows(update.ChatID)
+		follows := b.store.Follows(update.ChatID)
 		if len(follows) == 0 {
 			return Reply{
 				ChatID: update.ChatID,
@@ -213,7 +249,7 @@ func HandleUpdate(update Update, store *MemoryStore) (Reply, error) {
 				"/forgetme will wipe all of your data.",
 		}, nil
 	case "/forgetme":
-		store.ForgetChat(update.ChatID)
+		b.store.ForgetChat(update.ChatID)
 		return Reply{
 			ChatID: update.ChatID,
 			Text:   "Your follows and account have been removed.",
