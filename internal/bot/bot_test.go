@@ -21,6 +21,19 @@ func (f fakeSource) Activity(mp string) []bot.Activity {
 	return f.items[mp]
 }
 
+// fakeResolver is an in-memory name resolver: canned matches keyed by the query. Handler
+// tests use it instead of a *Resolver + httptest.Server so they never encode Parliament's
+// wire format — the resolver's own tests already own that, and a handler test that decodes
+// JSON would break whenever the API's shape changed for reasons /find does not care about.
+// A query with no canned entry yields no matches, which is what the real API does too.
+type fakeResolver struct {
+	matches map[string][]bot.Member
+}
+
+func (f fakeResolver) ResolveName(name string) ([]bot.Member, error) {
+	return f.matches[name], nil
+}
+
 // Slice B1 (Phase B, the HTTP seam): given the Members API's search JSON for a name, the
 // resolver returns that MP's durable member ID. This is the first network slice, and the
 // behavior forces the whole seam into existence: a Resolver with an INJECTABLE base URL
@@ -270,15 +283,16 @@ func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
 // distinct behavior — its own later slice, not this one.)
 func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 
 	mps := []string{"Keir Starmer", "Rishi Sunak"}
 	for _, mp := range mps {
-		if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store); err != nil {
+		if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("following %q: %v", mp, err)
 		}
 	}
 
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/list"}, store)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/list"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/list) returned error: %v", err)
 	}
@@ -300,8 +314,9 @@ func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
 // not pinned — only non-empty, and distinct from the with-follows reply.
 func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 
-	empty, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"}, store)
+	empty, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/list) returned error: %v", err)
 	}
@@ -317,10 +332,10 @@ func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
 	// must not merely be that list with an empty body — i.e. not a prefix of the
 	// populated reply ("You follow: " is a prefix of "You follow: Keir Starmer"). It has
 	// to be its own message, so a user following nobody isn't shown a dangling list.
-	if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow Keir Starmer"}, store); err != nil {
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow Keir Starmer"}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
-	populated, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"}, store)
+	populated, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/list) after follow returned error: %v", err)
 	}
@@ -336,7 +351,7 @@ func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
 func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 	// Capture the success confirmation behaviorally so we can assert the hint differs
 	// from it without hardcoding either string.
-	confirm, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow Keir Starmer"}, bot.NewMemoryStore())
+	confirm, err := bot.New(bot.NewMemoryStore(), nil).HandleUpdate(bot.Update{ChatID: 1, Text: "/follow Keir Starmer"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/follow <name>) returned error: %v", err)
 	}
@@ -344,8 +359,9 @@ func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 	for _, text := range []string{"/follow", "/follow   "} {
 		t.Run(text, func(t *testing.T) {
 			store := bot.NewMemoryStore()
+			b := bot.New(store, nil)
 
-			reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: text}, store)
+			reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: text})
 			if err != nil {
 				t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
 			}
@@ -373,16 +389,17 @@ func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 // addressed back to the chat and non-empty; exact wording stays free.
 func TestHandleUpdate_unfollow_removesNamedMPOnly(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 
 	const kept = "Rishi Sunak"
 	const removed = "Keir Starmer"
 	for _, mp := range []string{removed, kept} {
-		if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store); err != nil {
+		if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("follow setup for %q failed: %v", mp, err)
 		}
 	}
 
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/unfollow " + removed}, store)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/unfollow " + removed})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/unfollow) returned error: %v", err)
 	}
@@ -415,10 +432,11 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 	// usage hint rather than a name-less "success" — and avoids hardcoding any wording.
 	const realName = "Keir Starmer"
 	confirmStore := bot.NewMemoryStore()
-	if _, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + realName}, confirmStore); err != nil {
+	confirmBot := bot.New(confirmStore, nil)
+	if _, err := confirmBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + realName}); err != nil {
 		t.Fatalf("follow setup for confirmation failed: %v", err)
 	}
-	confirm, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + realName}, confirmStore)
+	confirm, err := confirmBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + realName})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/unfollow <name>) returned error: %v", err)
 	}
@@ -427,12 +445,13 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 	for _, text := range []string{"/unfollow", "/unfollow   "} {
 		t.Run(text, func(t *testing.T) {
 			store := bot.NewMemoryStore()
+			b := bot.New(store, nil)
 			const followed = "Rishi Sunak"
-			if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + followed}, store); err != nil {
+			if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + followed}); err != nil {
 				t.Fatalf("follow setup failed: %v", err)
 			}
 
-			reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: text}, store)
+			reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: text})
 			if err != nil {
 				t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
 			}
@@ -465,21 +484,23 @@ func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
 
 	// Arm A: chat genuinely follows mp, then unfollows — capture the real success reply.
 	following := bot.NewMemoryStore()
-	if _, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + mp}, following); err != nil {
+	followingBot := bot.New(following, nil)
+	if _, err := followingBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + mp}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
-	success, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + mp}, following)
+	success, err := followingBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + mp})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/unfollow followed) returned error: %v", err)
 	}
 
 	// Arm B: chat follows someone ELSE, then unfollows mp it never followed.
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 	const other = "Rishi Sunak"
-	if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + other}, store); err != nil {
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + other}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/unfollow " + mp}, store)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/unfollow " + mp})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/unfollow unknown) returned error: %v", err)
 	}
@@ -512,22 +533,24 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 
 	// Reference: the success confirmation when the chat follows ONLY the target.
 	solo := bot.NewMemoryStore()
-	if _, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + target}, solo); err != nil {
+	soloBot := bot.New(solo, nil)
+	if _, err := soloBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + target}); err != nil {
 		t.Fatalf("solo follow setup failed: %v", err)
 	}
-	success, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + target}, solo)
+	success, err := soloBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + target})
 	if err != nil {
 		t.Fatalf("solo unfollow failed: %v", err)
 	}
 
 	// The chat under test follows the target AND someone else, then unfollows the target.
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 	for _, mp := range []string{target, other} {
-		if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + mp}, store); err != nil {
+		if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("follow setup for %q failed: %v", mp, err)
 		}
 	}
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/unfollow " + target}, store)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/unfollow " + target})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/unfollow) returned error: %v", err)
 	}
@@ -552,18 +575,19 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 // and non-empty; wording stays free.
 func TestHandleUpdate_forgetme_wipesSubscriptionAndFollows(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 
 	// The chat is fully present: subscribed via /start and following two MPs.
-	if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}, store); err != nil {
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}); err != nil {
 		t.Fatalf("/start setup failed: %v", err)
 	}
 	for _, mp := range []string{"Keir Starmer", "Rishi Sunak"} {
-		if _, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store); err != nil {
+		if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("follow setup for %q failed: %v", mp, err)
 		}
 	}
 
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/forgetme"}, store)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/forgetme"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/forgetme) returned error: %v", err)
 	}
@@ -585,6 +609,55 @@ func TestHandleUpdate_forgetme_wipesSubscriptionAndFollows(t *testing.T) {
 	}
 }
 
+// Slice B5 (Phase B): /find <query> is the FIRST command that reaches outside the bot's own
+// memory. Everything the resolver learned in B1–B4 has so far been unreachable from a chat:
+// HandleUpdate could not name a real MP if it wanted to. This slice connects the two, which
+// is why the resolver arrives as a Bot dependency rather than a parameter.
+//
+// The behavior: a search naming several sitting MPs must show the user ALL of them. B4 made
+// the deliberate decision to return every match rather than guess, precisely so a caller
+// could offer a choice — a /find that reported only the first would throw that away and
+// silently mislead anyone searching a common surname. The reply is asserted by Contains per
+// member so the layout (numbered list, one per line, however Ian likes) stays free.
+//
+// Note the fake is passed as a value of an unexported test type, so /find cannot be
+// satisfied by depending on *Resolver: the Bot has to accept an INTERFACE that both the real
+// resolver and this fake satisfy. That is the point of taking the dependency here.
+//
+// Deliberately NOT in this slice, each its own RED later: a bare /find with no query, a
+// query matching nobody (B1b moved that wording up to exactly this caller), and a resolver
+// returning an error because the API is down.
+func TestHandleUpdate_find_repliesWithEveryMatchingMP(t *testing.T) {
+	// Three sitting MPs the live API really does return for "Smith" — including Connor
+	// Naismith, who matches because the API matches a substring anywhere in the name.
+	smiths := []bot.Member{
+		{ID: 4451, Name: "Cat Smith"},
+		{ID: 4425, Name: "Jeff Smith"},
+		{ID: 5266, Name: "Connor Naismith"},
+	}
+	store := bot.NewMemoryStore()
+	b := bot.New(store, fakeResolver{matches: map[string][]bot.Member{"Smith": smiths}})
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/find Smith"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/find) returned error: %v", err)
+	}
+
+	// Assert: every match is offered to the user, none quietly dropped. Keying the fake by
+	// query also pins that the search term came from the message, not a constant — a wrong
+	// query finds no canned matches and no name appears.
+	for _, m := range smiths {
+		if !strings.Contains(reply.Text, m.Name) {
+			t.Errorf("/find reply %q does not mention %q", reply.Text, m.Name)
+		}
+	}
+
+	// Assert: addressed back to the chat that asked.
+	if reply.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+	}
+}
+
 // Slice 6: /follow <name> records that the chat follows that MP, readable back via
 // a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
 // this pins that HandleUpdate splits the command from its argument on the FIRST space
@@ -592,16 +665,17 @@ func TestHandleUpdate_forgetme_wipesSubscriptionAndFollows(t *testing.T) {
 // addressed back to the chat, non-empty, and distinct from the /start welcome.
 func TestHandleUpdate_follow_recordsNamedMP(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 
 	// Capture the welcome behaviorally so we can assert the confirmation differs
 	// from it without hardcoding either string.
-	welcome, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}, store)
+	welcome, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/start) returned error: %v", err)
 	}
 
 	const mp = "Keir Starmer"
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}, store)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/follow) returned error: %v", err)
 	}
@@ -629,8 +703,9 @@ func TestHandleUpdate_follow_recordsNamedMP(t *testing.T) {
 // replies as a set (chatID -> text), never by position.
 func TestBroadcast_sendsMessageToEverySubscriber(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 	for _, id := range []int64{1, 2} {
-		if _, err := bot.HandleUpdate(bot.Update{ChatID: id, Text: "/start"}, store); err != nil {
+		if _, err := b.HandleUpdate(bot.Update{ChatID: id, Text: "/start"}); err != nil {
 			t.Fatalf("subscribing chat %d: %v", id, err)
 		}
 	}
@@ -659,10 +734,11 @@ func TestBroadcast_sendsMessageToEverySubscriber(t *testing.T) {
 // welcome. Drives a remove side-effect (the mirror of /start's record).
 func TestHandleUpdate_stop_unsubscribesAndDistinctReply(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 
 	// Arrange: chat 42 is subscribed. Capture the welcome behaviorally so we
 	// can assert the goodbye differs from it without hardcoding either string.
-	welcome, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}, store)
+	welcome, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/start) returned error: %v", err)
 	}
@@ -671,7 +747,7 @@ func TestHandleUpdate_stop_unsubscribesAndDistinctReply(t *testing.T) {
 	}
 
 	// Act: chat 42 sends /stop.
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 42, Text: "/stop"}, store)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/stop"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/stop) returned error: %v", err)
 	}
@@ -697,9 +773,10 @@ func TestHandleUpdate_stop_unsubscribesAndDistinctReply(t *testing.T) {
 // store via Chats(), the accessor broadcasting will need anyway.
 func TestHandleUpdate_repeatedStart_recordsChatOnce(t *testing.T) {
 	store := bot.NewMemoryStore()
+	b := bot.New(store, nil)
 
 	for i := 0; i < 2; i++ {
-		if _, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/start"}, store); err != nil {
+		if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/start"}); err != nil {
 			t.Fatalf("HandleUpdate call %d returned error: %v", i+1, err)
 		}
 	}
@@ -715,13 +792,14 @@ func TestHandleUpdate_repeatedStart_recordsChatOnce(t *testing.T) {
 func TestHandleUpdate_unknownMessage_notRecordedAndDistinctReply(t *testing.T) {
 	// Establish what the welcome looks like, behaviorally, rather than
 	// hardcoding the string here.
-	welcome, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "/start"}, bot.NewMemoryStore())
+	welcome, err := bot.New(bot.NewMemoryStore(), nil).HandleUpdate(bot.Update{ChatID: 1, Text: "/start"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/start) returned error: %v", err)
 	}
 
 	store := bot.NewMemoryStore()
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 99, Text: "hello"}, store)
+	b := bot.New(store, nil)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 99, Text: "hello"})
 	if err != nil {
 		t.Fatalf("HandleUpdate returned error: %v", err)
 	}
@@ -747,13 +825,14 @@ func TestHandleUpdate_unknownMessage_notRecordedAndDistinctReply(t *testing.T) {
 // hardcoding the fallback string.
 func TestHandleUpdate_help_repliesWithHelpTextDistinctFromDefault(t *testing.T) {
 	// Establish the default fallback behaviorally rather than hardcoding its text.
-	fallback, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"}, bot.NewMemoryStore())
+	fallback, err := bot.New(bot.NewMemoryStore(), nil).HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(unknown) returned error: %v", err)
 	}
 
 	store := bot.NewMemoryStore()
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/help"}, store)
+	b := bot.New(store, nil)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/help"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/help) returned error: %v", err)
 	}
@@ -776,13 +855,14 @@ func TestHandleUpdate_help_repliesWithHelpTextDistinctFromDefault(t *testing.T) 
 // /privacy differs from it, rather than hardcoding the fallback string. Wording is free.
 func TestHandleUpdate_privacy_repliesWithPrivacyTextDistinctFromDefault(t *testing.T) {
 	// Establish the default fallback behaviorally rather than hardcoding its text.
-	fallback, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"}, bot.NewMemoryStore())
+	fallback, err := bot.New(bot.NewMemoryStore(), nil).HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(unknown) returned error: %v", err)
 	}
 
 	store := bot.NewMemoryStore()
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/privacy"}, store)
+	b := bot.New(store, nil)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/privacy"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/privacy) returned error: %v", err)
 	}
@@ -805,13 +885,14 @@ func TestHandleUpdate_privacy_repliesWithPrivacyTextDistinctFromDefault(t *testi
 // behaviorally and assert /source differs from it, rather than hardcoding wording.
 func TestHandleUpdate_source_repliesWithSourceTextDistinctFromDefault(t *testing.T) {
 	// Establish the default fallback behaviorally rather than hardcoding its text.
-	fallback, err := bot.HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"}, bot.NewMemoryStore())
+	fallback, err := bot.New(bot.NewMemoryStore(), nil).HandleUpdate(bot.Update{ChatID: 1, Text: "not-a-command"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(unknown) returned error: %v", err)
 	}
 
 	store := bot.NewMemoryStore()
-	reply, err := bot.HandleUpdate(bot.Update{ChatID: 7, Text: "/source"}, store)
+	b := bot.New(store, nil)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/source"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/source) returned error: %v", err)
 	}
@@ -847,8 +928,9 @@ func TestHandleUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := bot.NewMemoryStore()
+			b := bot.New(store, nil)
 
-			reply, err := bot.HandleUpdate(tt.update, store)
+			reply, err := b.HandleUpdate(tt.update)
 			if err != nil {
 				t.Fatalf("HandleUpdate returned error: %v", err)
 			}
