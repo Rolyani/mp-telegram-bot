@@ -26,11 +26,19 @@ func (f fakeSource) Activity(mp string) []bot.Activity {
 // wire format — the resolver's own tests already own that, and a handler test that decodes
 // JSON would break whenever the API's shape changed for reasons /find does not care about.
 // A query with no canned entry yields no matches, which is what the real API does too.
+//
+// It also records every query it is asked for, so a test can assert the resolver was NOT
+// consulted — "no request was made" is a real, observable behavior, and the only way to
+// pin that a guard runs BEFORE the network call rather than after it. Recording needs a
+// POINTER receiver: a value receiver gets a copy, so the append would be written to the
+// copy and thrown away, leaving calls empty and the assertion passing vacuously.
 type fakeResolver struct {
 	matches map[string][]bot.Member
+	calls   []string
 }
 
-func (f fakeResolver) ResolveName(name string) ([]bot.Member, error) {
+func (f *fakeResolver) ResolveName(name string) ([]bot.Member, error) {
+	f.calls = append(f.calls, name)
 	return f.matches[name], nil
 }
 
@@ -636,7 +644,7 @@ func TestHandleUpdate_find_repliesWithEveryMatchingMP(t *testing.T) {
 		{ID: 5266, Name: "Connor Naismith"},
 	}
 	store := bot.NewMemoryStore()
-	b := bot.New(store, fakeResolver{matches: map[string][]bot.Member{"Smith": smiths}})
+	b := bot.New(store, &fakeResolver{matches: map[string][]bot.Member{"Smith": smiths}})
 
 	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/find Smith"})
 	if err != nil {
@@ -655,6 +663,132 @@ func TestHandleUpdate_find_repliesWithEveryMatchingMP(t *testing.T) {
 	// Assert: addressed back to the chat that asked.
 	if reply.ChatID != 7 {
 		t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+	}
+}
+
+// Slice B6: /find for a name nobody has replies with something that actually says so.
+// B4 made "nobody matched" a SUCCESSFUL answer (an empty slice, not an error) and moved
+// the wording up to this caller — this is that caller, and it currently produces the
+// dangling "Found: " that slice 11 fixed for /list. The assertion is slice 11's trick,
+// and it is the whole point of the test: comparing the two replies for INEQUALITY would
+// pass against the bug, because "Found: " already differs from "Found: Cat Smith, ...".
+// Asserting the populated reply does not START WITH the empty one catches a reply that is
+// merely the same template with its list missing, which is the failure we actually mean.
+func TestHandleUpdate_find_noMatches_distinctReply(t *testing.T) {
+	store := bot.NewMemoryStore()
+	// The fake yields no matches for any query it has no canned entry for — exactly what
+	// the live API does for a name nobody has.
+	resolver := &fakeResolver{matches: map[string][]bot.Member{
+		"Smith": {{ID: 4451, Name: "Cat Smith"}},
+	}}
+	b := bot.New(store, resolver)
+
+	// Capture a populated reply behaviorally, so the test never pins either wording.
+	populated, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/find Smith"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/find Smith) returned error: %v", err)
+	}
+
+	empty, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/find Wibblethorpe"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/find Wibblethorpe) returned error: %v", err)
+	}
+
+	if empty.Text == "" {
+		t.Error("/find with no matches replied with empty text, want a message saying nobody matched")
+	}
+
+	if strings.HasPrefix(populated.Text, empty.Text) {
+		t.Errorf("/find with no matches replied %q, which is just the start of the populated reply %q — want a distinct message, not a list with nothing in it", empty.Text, populated.Text)
+	}
+
+	// Assert: the "nobody matched" path is still addressed back to the asking chat.
+	if empty.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", empty.ChatID)
+	}
+}
+
+// Slice B7: /find with no query is rejected WITHOUT asking the Members API anything.
+// Mirror of the /follow guard (slice 7) and the /unfollow guard (slice 13) — but unlike
+// those two this guard is not merely cosmetic, because /find has a collaborator behind it.
+// Today a bare /find sends an EMPTY QUERY to the live API and then formats whatever comes
+// back, so the guard has to short-circuit BEFORE the ResolveName call, not after it.
+// That ordering is the whole point of the slice, and asserting the reply alone would not
+// pin it: a guard placed after the call would produce the same words having already made
+// a pointless request. So the load-bearing assertion is on the resolver's call log.
+func TestHandleUpdate_findWithoutQuery_asksTheAPINothingAndHints(t *testing.T) {
+	store := bot.NewMemoryStore()
+	canned := map[string][]bot.Member{"Smith": {{ID: 4451, Name: "Cat Smith"}}}
+
+	// Capture the "nobody matched" reply behaviorally, so no wording is pinned. A missing
+	// query must not be answered with it: "no MP is called that" is a different statement
+	// from "you didn't tell me who to look for", and only one of them is the user's fault.
+	noMatches, err := bot.New(store, &fakeResolver{matches: canned}).
+		HandleUpdate(bot.Update{ChatID: 7, Text: "/find Wibblethorpe"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/find Wibblethorpe) returned error: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "bare command", text: "/find"},
+		{name: "whitespace-only query", text: "/find   "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A fresh resolver per row, so each row's call log is only about that row.
+			resolver := &fakeResolver{matches: canned}
+			b := bot.New(store, resolver)
+
+			reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: tt.text})
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q) returned error: %v", tt.text, err)
+			}
+
+			if len(resolver.calls) != 0 {
+				t.Errorf("%q searched the API for %q; a missing query must be rejected before any request is made", tt.text, resolver.calls)
+			}
+
+			if reply.Text == "" {
+				t.Errorf("%q replied with empty text, want a hint saying a name is needed", tt.text)
+			}
+
+			if reply.Text == noMatches.Text {
+				t.Errorf("%q replied %q, the same thing said when a real name matches nobody — want a hint that a name is missing", tt.text, reply.Text)
+			}
+
+			if reply.ChatID != 7 {
+				t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+			}
+		})
+	}
+}
+
+// Slice B7b: a padded query is searched for CLEANED. The guard above trims the argument to
+// decide whether anything was typed, so the search must use that same trimmed value —
+// otherwise the two drift apart and /find asks Parliament for "  Smith  ", padding and all.
+// The live API matches on a substring and does no fuzzy matching (probed in B3), so stray
+// spaces are not harmlessly ignored: they are part of what it looks for, and find nothing.
+func TestHandleUpdate_findPaddedQuery_searchesForTheTrimmedName(t *testing.T) {
+	store := bot.NewMemoryStore()
+	resolver := &fakeResolver{matches: map[string][]bot.Member{
+		"Smith": {{ID: 4451, Name: "Cat Smith"}},
+	}}
+	b := bot.New(store, resolver)
+
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/find   Smith  "}); err != nil {
+		t.Fatalf("HandleUpdate(/find   Smith  ) returned error: %v", err)
+	}
+
+	// Asserting the exact call log rather than the reply: the reply happens to be right
+	// either way here, because a fake keyed by an unknown query returns no matches and the
+	// B6 guard answers politely. What is wrong is the request itself.
+	want := []string{"Smith"}
+	if len(resolver.calls) != 1 || resolver.calls[0] != want[0] {
+		t.Errorf("/find searched the API for %q, want %q — the padding should be trimmed before the query goes out", resolver.calls, want)
 	}
 }
 

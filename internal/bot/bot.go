@@ -167,108 +167,81 @@ func (s *MemoryStore) WasSent(chatID int64, activityID string) bool {
 	return s.seen[chatID][activityID]
 }
 
+// reply addresses text back to the chat that sent the command. Every branch of
+// HandleUpdate answers the asking chat, so the pairing is worth naming once rather than
+// spelling out seventeen times — it keeps each branch about what the bot SAYS.
+func reply(chatID int64, text string) Reply {
+	return Reply{ChatID: chatID, Text: text}
+}
+
 // HandleUpdate processes an update and returns a reply
 func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	cmd, arg, _ := strings.Cut(update.Text, " ")
 	switch cmd {
 	case "/start":
 		b.store.AddChat(update.ChatID)
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "Welcome! Send /start to get going.",
-		}, nil
+		return reply(update.ChatID, "Welcome! Send /start to get going."), nil
 	case "/stop":
 		b.store.RemoveChat(update.ChatID)
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "Your details have been removed.",
-		}, nil
+		return reply(update.ChatID, "Your details have been removed."), nil
 	case "/find":
-		members, err := b.resolver.ResolveName(arg)
+		name := strings.TrimSpace(arg)
+		if name == "" {
+			return reply(update.ChatID, "Please enter an MP's name to search for."), nil
+		}
+		members, err := b.resolver.ResolveName(name)
 		if err != nil {
 			return Reply{}, err
+		}
+		// Nobody matching is a successful answer, not a failure: the resolver reserves
+		// errors for requests that genuinely failed. So it is answered here, in words,
+		// rather than returned as an error the user would never see.
+		if len(members) == 0 {
+			return reply(update.ChatID, "No MPs with that name found."), nil
 		}
 		var names []string
 		for _, m := range members {
 			names = append(names, m.Name)
 		}
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "Found: " + strings.Join(names, ", "),
-		}, nil
+		return reply(update.ChatID, "Found: "+strings.Join(names, ", ")), nil
 	case "/follow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return Reply{
-				ChatID: update.ChatID,
-				Text:   "You must enter a name.",
-			}, nil
+			return reply(update.ChatID, "Please enter an MP's name to follow."), nil
 		}
 		b.store.FollowMP(update.ChatID, name)
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "Now following " + name + ".",
-		}, nil
+		return reply(update.ChatID, "Now following "+name+"."), nil
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return Reply{
-				ChatID: update.ChatID,
-				Text:   "Enter an MPs name to unfollow.",
-			}, nil
+			return reply(update.ChatID, "Please enter an MP's name to unfollow."), nil
 		}
 		removed := b.store.UnfollowMP(update.ChatID, name)
-		if removed == false {
-			return Reply{
-				ChatID: update.ChatID,
-				Text:   "You were not following this MP.",
-			}, nil
+		if !removed {
+			return reply(update.ChatID, "You were not following this MP."), nil
 		}
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "You have unfollowed " + name + ".",
-		}, nil
-
+		return reply(update.ChatID, "You have unfollowed "+name+"."), nil
 	case "/list":
 		follows := b.store.Follows(update.ChatID)
 		if len(follows) == 0 {
-			return Reply{
-				ChatID: update.ChatID,
-				Text:   "You are not following any MPs yet.",
-			}, nil
+			return reply(update.ChatID, "You are not following any MPs yet."), nil
 		}
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "You follow: " + strings.Join(follows, ", "),
-		}, nil
+		return reply(update.ChatID, "You follow: "+strings.Join(follows, ", ")), nil
 	case "/help":
-		return Reply{
-			ChatID: update.ChatID,
-			Text: "Follow MPs by typing their name or the post code into /follow.\n" +
-				"/start will look for the last activity for the followed MPs.\n" +
-				"/forgetme will wipe all of your data.",
-		}, nil
+		return reply(update.ChatID,
+			"Follow MPs by typing their name or the post code into /follow.\n"+
+				"/start will look for the last activity for the followed MPs.\n"+
+				"/forgetme will wipe all of your data."), nil
 	case "/forgetme":
 		b.store.ForgetChat(update.ChatID)
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "Your follows and account have been removed.",
-		}, nil
+		return reply(update.ChatID, "Your follows and account have been removed."), nil
 	case "/privacy":
-		return Reply{
-			ChatID: update.ChatID,
-			Text: "This bot only stores the MPs you select. No other personal information is collected.\n" +
-				"The /forgetme command will wipe all of the data stored for your ID",
-		}, nil
+		return reply(update.ChatID,
+			"This bot only stores the MPs you select. No other personal information is collected.\n"+
+				"The /forgetme command will wipe all of the data stored for your ID"), nil
 	case "/source":
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "Full code available at: https://github.com/Rolyani/mp-telegram-bot",
-		}, nil
+		return reply(update.ChatID, "Full code available at: https://github.com/Rolyani/mp-telegram-bot"), nil
 	default:
-		return Reply{
-			ChatID: update.ChatID,
-			Text:   "Use /start to begin.",
-		}, nil
+		return reply(update.ChatID, "Use /start to begin."), nil
 	}
 }
