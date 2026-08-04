@@ -174,7 +174,13 @@ func reply(chatID int64, text string) Reply {
 	return Reply{ChatID: chatID, Text: text}
 }
 
-// HandleUpdate processes an update and returns a reply
+// HandleUpdate processes an update and returns a reply.
+//
+// Note the return values are NOT the usual either/or: a non-nil error still carries a
+// reply that should be sent. A lookup that fails has two audiences — the user, who needs
+// a sentence rather than silence, and the caller, which needs the failure to log and
+// retry on — and both are served in one call. Callers must therefore send the Reply
+// before deciding what to do about the error, not return early on it.
 func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	cmd, arg, _ := strings.Cut(update.Text, " ")
 	switch cmd {
@@ -191,7 +197,11 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
-			return Reply{}, err
+			// Both values are returned deliberately: the user is told the lookup failed,
+			// and the error still reaches the caller. Do not "tidy" this to a bare error —
+			// the failure is an outage of a service we do not control, and answering the
+			// user with silence is never right. See HandleUpdate's doc comment.
+			return reply(update.ChatID, "Sorry, I couldn't connect to the Parliament API. Try again soon."), err
 		}
 		// Nobody matching is a successful answer, not a failure: the resolver reserves
 		// errors for requests that genuinely failed. So it is answered here, in words,
