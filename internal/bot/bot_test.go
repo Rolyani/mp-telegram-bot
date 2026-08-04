@@ -1,6 +1,7 @@
 package bot_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -32,13 +33,21 @@ func (f fakeSource) Activity(mp string) []bot.Activity {
 // pin that a guard runs BEFORE the network call rather than after it. Recording needs a
 // POINTER receiver: a value receiver gets a copy, so the append would be written to the
 // copy and thrown away, leaving calls empty and the assertion passing vacuously.
+// A non-nil err makes every lookup fail with it, standing in for an unreachable or
+// misbehaving Members API. It returns no members alongside it, exactly as the real
+// resolver does on all three of its failure paths — so no test can quietly depend on
+// half an answer riding along with a failure.
 type fakeResolver struct {
 	matches map[string][]bot.Member
 	calls   []string
+	err     error
 }
 
 func (f *fakeResolver) ResolveName(name string) ([]bot.Member, error) {
 	f.calls = append(f.calls, name)
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.matches[name], nil
 }
 
@@ -792,6 +801,61 @@ func TestHandleUpdate_findPaddedQuery_searchesForTheTrimmedName(t *testing.T) {
 	}
 }
 
+// Slice B8: the last /find sad path — the Members API itself fails. Today the error is
+// returned bare with a zero Reply, so the user is told nothing at all while the bot knows
+// perfectly well what went wrong. This is a foreseeable failure of a service we do not
+// control, not a bug, and silence is the one answer that is always wrong.
+//
+// Both halves of the return value are load-bearing here, which is the point of the slice:
+// the reply assertions fail if the error is swallowed into words only, and the error
+// assertion fails if the user is answered but the caller learns nothing. Neither alone
+// pins the decision that a failed lookup has TWO audiences — the user, who needs a
+// sentence, and Phase E's poll loop, which needs something to log and retry on.
+func TestHandleUpdate_findWhenResolverFails_repliesAndReportsTheError(t *testing.T) {
+	store := bot.NewMemoryStore()
+	canned := map[string][]bot.Member{"Smith": {{ID: 4451, Name: "Cat Smith"}}}
+
+	// Capture the "nobody matched" reply behaviorally, so no wording is pinned. An outage
+	// must not be answered with it: "no MP is called that" is a settled fact about
+	// Parliament, while "the lookup failed" is a temporary fact about us, and only one of
+	// them is worth trying again in a minute.
+	noMatches, err := bot.New(store, &fakeResolver{matches: canned}).
+		HandleUpdate(bot.Update{ChatID: 7, Text: "/find Wibblethorpe"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/find Wibblethorpe) returned error: %v", err)
+	}
+
+	// A test-local error value, so the assertion below can check this exact failure came
+	// back rather than merely that something did. This is not the sentinel-error work
+	// deferred in B2: nothing in the bot package branches on the KIND of failure, and the
+	// handler still treats every resolver error identically.
+	errAPIDown := errors.New("members API returned 503 Service Unavailable")
+
+	resolver := &fakeResolver{matches: canned, err: errAPIDown}
+	b := bot.New(store, resolver)
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/find Smith"})
+
+	// The caller's half: the failure travels up intact, so the layer that owns logging and
+	// retries can see what actually went wrong instead of a flattened "something failed".
+	if !errors.Is(err, errAPIDown) {
+		t.Errorf("HandleUpdate returned error %v, want the resolver's own %v — a failed lookup must reach the caller, not stop at the handler", err, errAPIDown)
+	}
+
+	// The user's half: they are told something, in this same call, despite the error.
+	if reply.Text == "" {
+		t.Errorf("/find replied with empty text when the API failed, want a sentence saying the lookup could not be done")
+	}
+
+	if reply.Text == noMatches.Text {
+		t.Errorf("/find replied %q when the API failed, the same thing said when a real name matches nobody — want a reply that does not claim to have searched", reply.Text)
+	}
+
+	if reply.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", reply.ChatID)
+	}
+}
+
 // Slice 6: /follow <name> records that the chat follows that MP, readable back via
 // a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
 // this pins that HandleUpdate splits the command from its argument on the FIRST space
@@ -909,7 +973,7 @@ func TestHandleUpdate_repeatedStart_recordsChatOnce(t *testing.T) {
 	store := bot.NewMemoryStore()
 	b := bot.New(store, nil)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/start"}); err != nil {
 			t.Fatalf("HandleUpdate call %d returned error: %v", i+1, err)
 		}
