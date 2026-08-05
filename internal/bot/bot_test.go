@@ -51,6 +51,24 @@ func (f *fakeResolver) ResolveName(name string) ([]bot.Member, error) {
 	return f.matches[name], nil
 }
 
+// knownMPs builds a resolver that recognises each of names, each resolving to exactly one
+// member with a distinct, stable ID.
+//
+// Since /follow started resolving names (slice C0), every test that uses /follow merely as
+// SETUP needs a resolver that knows the names it types — while caring only that the follow
+// landed, not which ID it landed under. This keeps that scaffolding to a single line and
+// out of the assertions. Tests that are ABOUT resolution build their fakeResolver directly,
+// so the IDs and match counts stay visible where they matter.
+//
+// A name it was not given still resolves to no matches, exactly as the real API does.
+func knownMPs(names ...string) *fakeResolver {
+	matches := make(map[string][]bot.Member, len(names))
+	for i, name := range names {
+		matches[name] = []bot.Member{{ID: 100 + i, Name: name}}
+	}
+	return &fakeResolver{matches: matches}
+}
+
 // Slice B1 (Phase B, the HTTP seam): given the Members API's search JSON for a name, the
 // resolver returns that MP's durable member ID. This is the first network slice, and the
 // behavior forces the whole seam into existence: a Resolver with an INJECTABLE base URL
@@ -250,7 +268,7 @@ func TestResolver_ResolveName_multipleMatches_returnsThemAll(t *testing.T) {
 func TestCheckActivity_itemAlreadySent_notPushedAgain(t *testing.T) {
 	store := bot.NewMemoryStore()
 	store.AddChat(1)
-	store.FollowMP(1, "Keir Starmer")
+	store.FollowMP(1, bot.Member{ID: 4514, Name: "Keir Starmer"})
 
 	source := fakeSource{items: map[string][]bot.Activity{
 		"Keir Starmer": {{ID: "v42", Text: "voted on Bill 42"}},
@@ -275,7 +293,7 @@ func TestCheckActivity_itemAlreadySent_notPushedAgain(t *testing.T) {
 func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
 	store := bot.NewMemoryStore()
 	store.AddChat(1)
-	store.FollowMP(1, "Keir Starmer")
+	store.FollowMP(1, bot.Member{ID: 4514, Name: "Keir Starmer"})
 
 	source := fakeSource{items: map[string][]bot.Activity{
 		"Keir Starmer": {{ID: "v42", Text: "voted on Bill 42"}},
@@ -299,10 +317,10 @@ func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
 // the exact formatting and ordering free to change. (The "follows nobody" case is a
 // distinct behavior — its own later slice, not this one.)
 func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
-	store := bot.NewMemoryStore()
-	b := bot.New(store, nil)
-
 	mps := []string{"Keir Starmer", "Rishi Sunak"}
+	store := bot.NewMemoryStore()
+	b := bot.New(store, knownMPs(mps...))
+
 	for _, mp := range mps {
 		if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("following %q: %v", mp, err)
@@ -331,7 +349,7 @@ func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
 // not pinned — only non-empty, and distinct from the with-follows reply.
 func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
 	store := bot.NewMemoryStore()
-	b := bot.New(store, nil)
+	b := bot.New(store, knownMPs("Keir Starmer"))
 
 	empty, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"})
 	if err != nil {
@@ -368,7 +386,7 @@ func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
 func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 	// Capture the success confirmation behaviorally so we can assert the hint differs
 	// from it without hardcoding either string.
-	confirm, err := bot.New(bot.NewMemoryStore(), nil).HandleUpdate(bot.Update{ChatID: 1, Text: "/follow Keir Starmer"})
+	confirm, err := bot.New(bot.NewMemoryStore(), knownMPs("Keir Starmer")).HandleUpdate(bot.Update{ChatID: 1, Text: "/follow Keir Starmer"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/follow <name>) returned error: %v", err)
 	}
@@ -405,11 +423,12 @@ func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 // drives an UnfollowMP store method (filter into a new slice). Confirmation is
 // addressed back to the chat and non-empty; exact wording stays free.
 func TestHandleUpdate_unfollow_removesNamedMPOnly(t *testing.T) {
-	store := bot.NewMemoryStore()
-	b := bot.New(store, nil)
-
 	const kept = "Rishi Sunak"
 	const removed = "Keir Starmer"
+
+	store := bot.NewMemoryStore()
+	b := bot.New(store, knownMPs(removed, kept))
+
 	for _, mp := range []string{removed, kept} {
 		if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("follow setup for %q failed: %v", mp, err)
@@ -423,7 +442,7 @@ func TestHandleUpdate_unfollow_removesNamedMPOnly(t *testing.T) {
 
 	// Assert: only the unfollowed MP is gone; the other remains.
 	got := store.Follows(42)
-	if len(got) != 1 || got[0] != kept {
+	if len(got) != 1 || got[0].Name != kept {
 		t.Fatalf("store.Follows(42) = %v, want exactly [%q]", got, kept)
 	}
 
@@ -449,7 +468,7 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 	// usage hint rather than a name-less "success" — and avoids hardcoding any wording.
 	const realName = "Keir Starmer"
 	confirmStore := bot.NewMemoryStore()
-	confirmBot := bot.New(confirmStore, nil)
+	confirmBot := bot.New(confirmStore, knownMPs(realName))
 	if _, err := confirmBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + realName}); err != nil {
 		t.Fatalf("follow setup for confirmation failed: %v", err)
 	}
@@ -461,9 +480,9 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 
 	for _, text := range []string{"/unfollow", "/unfollow   "} {
 		t.Run(text, func(t *testing.T) {
-			store := bot.NewMemoryStore()
-			b := bot.New(store, nil)
 			const followed = "Rishi Sunak"
+			store := bot.NewMemoryStore()
+			b := bot.New(store, knownMPs(followed))
 			if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + followed}); err != nil {
 				t.Fatalf("follow setup failed: %v", err)
 			}
@@ -474,7 +493,7 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 			}
 
 			// The existing follow must be untouched — a nameless /unfollow removes nothing.
-			if got := store.Follows(7); len(got) != 1 || got[0] != followed {
+			if got := store.Follows(7); len(got) != 1 || got[0].Name != followed {
 				t.Errorf("store.Follows(7) = %v, want unchanged [%q] for %q", got, followed, text)
 			}
 			if reply.ChatID != 7 {
@@ -501,7 +520,7 @@ func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
 
 	// Arm A: chat genuinely follows mp, then unfollows — capture the real success reply.
 	following := bot.NewMemoryStore()
-	followingBot := bot.New(following, nil)
+	followingBot := bot.New(following, knownMPs(mp))
 	if _, err := followingBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + mp}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
@@ -511,9 +530,9 @@ func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
 	}
 
 	// Arm B: chat follows someone ELSE, then unfollows mp it never followed.
-	store := bot.NewMemoryStore()
-	b := bot.New(store, nil)
 	const other = "Rishi Sunak"
+	store := bot.NewMemoryStore()
+	b := bot.New(store, knownMPs(other))
 	if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + other}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
@@ -523,7 +542,7 @@ func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
 	}
 
 	// No-op: the unrelated follow is left untouched.
-	if got := store.Follows(7); len(got) != 1 || got[0] != other {
+	if got := store.Follows(7); len(got) != 1 || got[0].Name != other {
 		t.Errorf("store.Follows(7) = %v, want unchanged [%q]", got, other)
 	}
 	if reply.ChatID != 7 {
@@ -550,7 +569,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 
 	// Reference: the success confirmation when the chat follows ONLY the target.
 	solo := bot.NewMemoryStore()
-	soloBot := bot.New(solo, nil)
+	soloBot := bot.New(solo, knownMPs(target))
 	if _, err := soloBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + target}); err != nil {
 		t.Fatalf("solo follow setup failed: %v", err)
 	}
@@ -561,7 +580,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 
 	// The chat under test follows the target AND someone else, then unfollows the target.
 	store := bot.NewMemoryStore()
-	b := bot.New(store, nil)
+	b := bot.New(store, knownMPs(target, other))
 	for _, mp := range []string{target, other} {
 		if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("follow setup for %q failed: %v", mp, err)
@@ -573,7 +592,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 	}
 
 	// The target is gone, the other remains.
-	if got := store.Follows(7); len(got) != 1 || got[0] != other {
+	if got := store.Follows(7); len(got) != 1 || got[0].Name != other {
 		t.Fatalf("store.Follows(7) = %v, want exactly [%q]", got, other)
 	}
 	// The target WAS removed, so the reply must be the success confirmation — identical
@@ -592,7 +611,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 // and non-empty; wording stays free.
 func TestHandleUpdate_forgetme_wipesSubscriptionAndFollows(t *testing.T) {
 	store := bot.NewMemoryStore()
-	b := bot.New(store, nil)
+	b := bot.New(store, knownMPs("Keir Starmer", "Rishi Sunak"))
 
 	// The chat is fully present: subscribed via /start and following two MPs.
 	if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}); err != nil {
@@ -856,14 +875,31 @@ func TestHandleUpdate_findWhenResolverFails_repliesAndReportsTheError(t *testing
 	}
 }
 
-// Slice 6: /follow <name> records that the chat follows that MP, readable back via
-// a new per-chat accessor Follows(chatID). The name carries a space (first/last), so
-// this pins that HandleUpdate splits the command from its argument on the FIRST space
-// only — a naive whitespace split would drop the surname. Confirmation reply is
-// addressed back to the chat, non-empty, and distinct from the /start welcome.
-func TestHandleUpdate_follow_recordsNamedMP(t *testing.T) {
+// Slice C0 (was slice 6): /follow <name> resolves the name against the Members API and
+// records the MP by DURABLE ID, not by the string the user typed.
+//
+// Slice 6 stored the raw name as an explicit placeholder, and this slice cashes that in.
+// The name was never a usable identity: B3's live probing showed "Smith" matching 11
+// sitting MPs, a peer, and a member who died in 1991, and Phase C cannot ask Parliament
+// what a *string* has been up to — activity is fetched per member ID. So the ID has to be
+// captured at the moment the user follows, which is the only moment we have a name to
+// resolve and a user present to hear about it going wrong.
+//
+// What is asserted is that the stored value carries the resolver's ID. That ID exists
+// nowhere in the update text, so it can only have arrived by consulting the resolver
+// with the typed name — which is why this needs no separate call-log assertion.
+//
+// The reply assertions and the two-word name are INHERITED FROM SLICE 6 AND MUST SURVIVE:
+// the name carries a space so the first-space-only split stays pinned, and a green reached
+// by dropping the confirmation reply would be no green at all.
+func TestHandleUpdate_follow_resolvesNameAndRecordsMemberID(t *testing.T) {
+	const mp = "Keir Starmer"
+	want := bot.Member{ID: 4514, Name: mp}
+	resolver := &fakeResolver{matches: map[string][]bot.Member{
+		mp: {want},
+	}}
 	store := bot.NewMemoryStore()
-	b := bot.New(store, nil)
+	b := bot.New(store, resolver)
 
 	// Capture the welcome behaviorally so we can assert the confirmation differs
 	// from it without hardcoding either string.
@@ -872,16 +908,15 @@ func TestHandleUpdate_follow_recordsNamedMP(t *testing.T) {
 		t.Fatalf("HandleUpdate(/start) returned error: %v", err)
 	}
 
-	const mp = "Keir Starmer"
 	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/follow) returned error: %v", err)
 	}
 
-	// Assert: the named MP is recorded as a follow for this chat.
+	// Assert: the MP is recorded as the resolver identified them — ID included.
 	got := store.Follows(42)
-	if len(got) != 1 || got[0] != mp {
-		t.Fatalf("store.Follows(42) = %v, want exactly [%q]", got, mp)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("store.Follows(42) = %v, want exactly [%v]", got, want)
 	}
 
 	// Assert: confirmation addressed back to the chat, non-empty, distinct from welcome.
