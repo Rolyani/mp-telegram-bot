@@ -17,7 +17,7 @@ type Reply struct {
 // MemoryStore remembers chat IDs
 type MemoryStore struct {
 	chats   map[int64]bool
-	follows map[int64][]string
+	follows map[int64][]Member
 	seen    map[int64]map[string]bool
 }
 
@@ -52,7 +52,12 @@ type Bot struct {
 }
 
 // New returns a Bot that records subscriptions and follows in store, and looks MPs up
-// through resolver. Commands that touch neither work with a nil resolver.
+// through resolver.
+//
+// /find and /follow both consult the resolver, so a nil one panics for them — though only
+// once a name is supplied, since both reject an empty name before making any request.
+// Every other command works with a nil resolver, and the tests pass nil deliberately to
+// record that they never reach the network.
 func New(store *MemoryStore, resolver NameResolver) *Bot {
 	return &Bot{store: store, resolver: resolver}
 }
@@ -61,7 +66,7 @@ func New(store *MemoryStore, resolver NameResolver) *Bot {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		chats:   make(map[int64]bool),
-		follows: make(map[int64][]string),
+		follows: make(map[int64][]Member),
 		seen:    make(map[int64]map[string]bool),
 	}
 }
@@ -81,19 +86,25 @@ func (s *MemoryStore) HasChat(chatID int64) bool {
 	return s.chats[chatID]
 }
 
-// FollowMP records that chatID follows the named MP.
-func (s *MemoryStore) FollowMP(chatID int64, mp string) {
+// FollowMP records that chatID follows mp. The MP arrives already resolved: the store
+// keeps identities, and deciding WHICH member a typed name meant belongs to the caller,
+// which is the only layer with a user to ask.
+func (s *MemoryStore) FollowMP(chatID int64, mp Member) {
 	s.follows[chatID] = append(s.follows[chatID], mp)
 }
 
-// UnfollowMP removes mp from chatID's follow list, leaving any others intact.
+// UnfollowMP removes the MP named mp from chatID's follow list, leaving any others intact.
 // Go has no built-in slice remove, so it filters in place: kept items are
 // appended back over the same backing array.
+//
+// Matching is still by NAME, because a name is what the user types. That makes it the one
+// place a stored ID is not yet load-bearing — unfollowing by ID needs a way for the user to
+// name one, so it waits for the disambiguation slice that gives them the choice.
 func (s *MemoryStore) UnfollowMP(chatID int64, mp string) bool {
 	keep := s.follows[chatID][:0]
 	removed := false
 	for _, f := range s.follows[chatID] {
-		if f != mp {
+		if f.Name != mp {
 			keep = append(keep, f)
 		} else {
 			removed = true
@@ -104,7 +115,7 @@ func (s *MemoryStore) UnfollowMP(chatID int64, mp string) bool {
 }
 
 // Follows returns the MPs that chatID follows.
-func (s *MemoryStore) Follows(chatID int64) []string {
+func (s *MemoryStore) Follows(chatID int64) []Member {
 	return s.follows[chatID]
 }
 
@@ -136,7 +147,10 @@ func CheckActivity(source ActivitySource, store *MemoryStore) []Reply {
 	for _, id := range chats {
 		follows := store.Follows(id)
 		for _, mp := range follows {
-			data := source.Activity(mp)
+			// Still polled by NAME. Fetching activity by member ID is what the stored ID
+			// is ultimately for, but changing ActivitySource's signature is Phase C's own
+			// slice and needs its own failing test — not a passenger on this one.
+			data := source.Activity(mp.Name)
 			for _, act := range data {
 				if store.WasSent(id, act.ID) {
 					continue
@@ -174,6 +188,23 @@ func reply(chatID int64, text string) Reply {
 	return Reply{ChatID: chatID, Text: text}
 }
 
+// apiDown is what every command says when the Members API cannot be reached. Named once
+// because it is one statement about one outage: /find and /follow both make the same
+// request and both fail the same way, and rewording it in only one of them would have the
+// bot describe the same problem two different ways.
+const apiDown = "Sorry, I couldn't connect to the Parliament API. Try again soon."
+
+// memberNames projects members onto their display names, ready to be joined into a reply.
+// A projection cannot filter in place the way UnfollowMP does — []Member and []string have
+// different layouts — so this allocates a fresh slice.
+func memberNames(members []Member) []string {
+	names := make([]string, 0, len(members))
+	for _, m := range members {
+		names = append(names, m.Name)
+	}
+	return names
+}
+
 // HandleUpdate processes an update and returns a reply.
 //
 // Note the return values are NOT the usual either/or: a non-nil error still carries a
@@ -201,7 +232,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 			// and the error still reaches the caller. Do not "tidy" this to a bare error —
 			// the failure is an outage of a service we do not control, and answering the
 			// user with silence is never right. See HandleUpdate's doc comment.
-			return reply(update.ChatID, "Sorry, I couldn't connect to the Parliament API. Try again soon."), err
+			return reply(update.ChatID, apiDown), err
 		}
 		// Nobody matching is a successful answer, not a failure: the resolver reserves
 		// errors for requests that genuinely failed. So it is answered here, in words,
@@ -209,18 +240,25 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		if len(members) == 0 {
 			return reply(update.ChatID, "No MPs with that name found."), nil
 		}
-		var names []string
-		for _, m := range members {
-			names = append(names, m.Name)
-		}
-		return reply(update.ChatID, "Found: "+strings.Join(names, ", ")), nil
+		return reply(update.ChatID, "Found: "+strings.Join(memberNames(members), ", ")), nil
 	case "/follow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
 			return reply(update.ChatID, "Please enter an MP's name to follow."), nil
 		}
-		b.store.FollowMP(update.ChatID, name)
-		return reply(update.ChatID, "Now following "+name+"."), nil
+		members, err := b.resolver.ResolveName(name)
+		if err != nil {
+			// Reply AND error, as /find does: an outage the user caused nothing of still
+			// owes them a sentence. See HandleUpdate's doc comment.
+			return reply(update.ChatID, apiDown), err
+		}
+		// KNOWN DEFERRED BUG, exactly as slice B1 shipped and B1b fixed: a name nobody has
+		// resolves to no members and this panics. Zero matches and several matches are the
+		// next two slices; taking the first match is the minimum that proves an ID is what
+		// gets stored.
+		mp := members[0]
+		b.store.FollowMP(update.ChatID, mp)
+		return reply(update.ChatID, "Now following "+mp.Name+"."), nil
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
@@ -236,7 +274,9 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		if len(follows) == 0 {
 			return reply(update.ChatID, "You are not following any MPs yet."), nil
 		}
-		return reply(update.ChatID, "You follow: "+strings.Join(follows, ", ")), nil
+		// The store carries each MP's name alongside their ID precisely so this needs no
+		// lookup: /list stays offline, and cannot fail because the Members API is down.
+		return reply(update.ChatID, "You follow: "+strings.Join(memberNames(follows), ", ")), nil
 	case "/help":
 		return reply(update.ChatID,
 			"Follow MPs by typing their name or the post code into /follow.\n"+
