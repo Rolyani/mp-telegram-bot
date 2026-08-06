@@ -12,6 +12,17 @@ type Update struct {
 type Reply struct {
 	ChatID int64
 	Text   string
+
+	// Choices offers the user a set of ready-made replies, each holding the EXACT text that
+	// sending it back would produce. Phase E renders them as a Telegram reply keyboard,
+	// where a button's text is what tapping it sends — so a choice arrives as an ordinary
+	// message and is handled like any other, and the bot never has to remember that it asked
+	// a question. Keeping whole commands in here rather than bare labels is what buys that:
+	// the user's choice travels in the user's own message, so there is no pending state to
+	// store, expire, or cancel when they type something else instead.
+	//
+	// Empty for every reply that asks nothing.
+	Choices []string
 }
 
 // MemoryStore remembers chat IDs
@@ -194,6 +205,13 @@ func reply(chatID int64, text string) Reply {
 // bot describe the same problem two different ways.
 const apiDown = "Sorry, I couldn't connect to the Parliament API. Try again soon."
 
+// noSuchMP is what every command says when the Members API answered perfectly well and the
+// answer was nobody. Named once for the same reason as apiDown: /find and /follow report one
+// fact here, and the plural in "MPs" describes what came BACK, not what was asked for, so it
+// does not vary by command. Distinct from apiDown on purpose — "we couldn't ask" and "we
+// asked and nobody matched" are different situations and the user can act on the difference.
+const noSuchMP = "No MPs with that name found."
+
 // memberNames projects members onto their display names, ready to be joined into a reply.
 // A projection cannot filter in place the way UnfollowMP does — []Member and []string have
 // different layouts — so this allocates a fresh slice.
@@ -238,7 +256,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		// errors for requests that genuinely failed. So it is answered here, in words,
 		// rather than returned as an error the user would never see.
 		if len(members) == 0 {
-			return reply(update.ChatID, "No MPs with that name found."), nil
+			return reply(update.ChatID, noSuchMP), nil
 		}
 		return reply(update.ChatID, "Found: "+strings.Join(memberNames(members), ", ")), nil
 	case "/follow":
@@ -252,10 +270,22 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 			// owes them a sentence. See HandleUpdate's doc comment.
 			return reply(update.ChatID, apiDown), err
 		}
-		// KNOWN DEFERRED BUG, exactly as slice B1 shipped and B1b fixed: a name nobody has
-		// resolves to no members and this panics. Zero matches and several matches are the
-		// next two slices; taking the first match is the minimum that proves an ID is what
-		// gets stored.
+		// Answered in words and with a nil error, for the same reason /find is above: the
+		// resolver reports "nobody is called that" as an empty slice, not a failure.
+		if len(members) == 0 {
+			return reply(update.ChatID, noSuchMP), nil
+		}
+		// A name several MPs share commits to nothing. Substring matching means "Smith" finds
+		// eleven sitting members, and picking one silently would leave the user following an
+		// MP they never asked for with no way to notice. Each choice is the command that
+		// follows one of them, so choosing costs a tap and needs no state — see Reply.Choices.
+		if len(members) > 1 {
+			r := reply(update.ChatID, "Several MPs match that name. Which one did you mean?")
+			for _, m := range members {
+				r.Choices = append(r.Choices, "/follow "+m.Name)
+			}
+			return r, nil
+		}
 		mp := members[0]
 		b.store.FollowMP(update.ChatID, mp)
 		return reply(update.ChatID, "Now following "+mp.Name+"."), nil
