@@ -1179,3 +1179,148 @@ func TestHandleUpdate(t *testing.T) {
 		})
 	}
 }
+
+// Slice C1: /follow a name NOBODY HAS. This is the deferred panic C0 shipped knowingly —
+// `mp := members[0]` on an empty slice — and it is B1b's bug one layer up: B4 made zero
+// matches a SUCCESSFUL answer (an empty slice, not an error), and C0 built a caller that
+// never learned to read it. /find already handles this; /follow crashes the process.
+//
+// The three assertions do different jobs. Reaching HandleUpdate at all proves the panic is
+// gone. Nothing recorded proves the guard runs BEFORE the store is touched — a green that
+// replied politely while appending a zero-value Member would leave the user following an
+// MP with ID 0 and no name. And err == nil pins the contract B4 chose and /find follows:
+// "nobody is called that" is a real answer to a reasonable question, not a failure.
+func TestHandleUpdate_follow_unknownName_recordsNothingAndSaysSo(t *testing.T) {
+	// Capture the success confirmation behaviorally, from its own store so the follow it
+	// records cannot leak into the assertions below. Neither wording is pinned; this also
+	// doubles as a check that the happy path C0 built still works after the guard lands.
+	confirmStore := bot.NewMemoryStore()
+	confirm, err := bot.New(confirmStore, knownMPs("Keir Starmer")).HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Keir Starmer"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/follow Keir Starmer) returned error: %v", err)
+	}
+
+	store := bot.NewMemoryStore()
+	// The resolver knows Keir Starmer and nobody else, so any other name resolves to no
+	// matches — exactly what the live API returns for a name nobody has.
+	b := bot.New(store, knownMPs("Keir Starmer"))
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Wibblethorpe"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/follow Wibblethorpe) returned error: %v, want nil — no such MP is an answer, not a failure", err)
+	}
+
+	if got := store.Follows(9); len(got) != 0 {
+		t.Errorf("store.Follows(9) = %v, want nothing recorded for a name nobody has", got)
+	}
+
+	if reply.Text == "" {
+		t.Error("/follow with an unresolvable name replied with empty text, want a message saying nobody matched")
+	}
+
+	if reply.Text == confirm.Text {
+		t.Errorf("/follow with an unresolvable name replied %q, the same as the success confirmation — want a distinct message", reply.Text)
+	}
+
+	if reply.ChatID != 9 {
+		t.Errorf("reply addressed to chat %d, want 9", reply.ChatID)
+	}
+}
+
+// Slice C2: /follow a name several MPs share follows NOBODY, and offers one choice per
+// match instead. This is the last of C0's deliberate debt: "/follow Smith" silently picked
+// one of eleven, so the user could end up following an MP they never asked for and had no
+// way to notice.
+//
+// The design being pinned here is that the bot stays STATELESS. Each choice is the exact
+// text that, sent back as an ordinary message, follows that one MP — so a Telegram reply
+// keyboard can render them as buttons and tapping one simply sends it. The bot never has to
+// remember that it asked a question, which is why no pending-question state appears in the
+// store.
+//
+// That is also why the load-bearing assertion REPLAYS each choice through HandleUpdate
+// rather than matching it against a string. A choice that reads "Cat Smith" looks perfectly
+// reasonable in a test and does NOTHING when tapped, because it carries no command. Feeding
+// it back is the only assertion that can tell the difference, and it leaves the exact
+// wording free.
+func TestHandleUpdate_follow_severalMatches_offersChoicesAndFollowsNobody(t *testing.T) {
+	// Three real sitting Smiths, including Connor Nai*smith* — B3's live probing established
+	// that the API matches SUBSTRING anywhere in the name, so ambiguity cannot be filtered
+	// away. The fake mirrors the same API: a short query returns all three, each full name
+	// returns one.
+	smiths := []bot.Member{
+		{ID: 4451, Name: "Cat Smith"},
+		{ID: 4478, Name: "Greg Smith"},
+		{ID: 4813, Name: "Connor Naismith"},
+	}
+	matches := map[string][]bot.Member{"Smith": smiths}
+	for _, m := range smiths {
+		matches[m.Name] = []bot.Member{m}
+	}
+
+	store := bot.NewMemoryStore()
+	b := bot.New(store, &fakeResolver{matches: matches})
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Smith"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/follow Smith) returned error: %v", err)
+	}
+
+	// Assert: an ambiguous follow commits to nothing. Picking one silently is the bug.
+	if got := store.Follows(9); len(got) != 0 {
+		t.Errorf("store.Follows(9) = %v, want nothing followed until the user has chosen", got)
+	}
+
+	// Assert: Telegram will not send a message with no text, so a bare menu is unsendable.
+	if reply.Text == "" {
+		t.Error("/follow with several matches replied with empty text, want a sentence explaining the choice")
+	}
+
+	if reply.ChatID != 9 {
+		t.Errorf("reply addressed to chat %d, want 9", reply.ChatID)
+	}
+
+	if len(reply.Choices) != len(smiths) {
+		t.Fatalf("reply offered %d choices %q, want one per match (%d)", len(reply.Choices), reply.Choices, len(smiths))
+	}
+
+	// Assert: every choice actually works, and picks out the MP it was offered for. Order is
+	// asserted because B4 already pins that the resolver preserves the API's order, so the
+	// nth choice belongs to the nth match.
+	for i, choice := range reply.Choices {
+		t.Run(choice, func(t *testing.T) {
+			chosenStore := bot.NewMemoryStore()
+			chosen := bot.New(chosenStore, &fakeResolver{matches: matches})
+
+			if _, err := chosen.HandleUpdate(bot.Update{ChatID: 9, Text: choice}); err != nil {
+				t.Fatalf("replaying choice %q returned error: %v", choice, err)
+			}
+
+			got := chosenStore.Follows(9)
+			if len(got) != 1 || got[0] != smiths[i] {
+				t.Errorf("sending choice %q back recorded %v, want exactly %v — a choice must be a message that follows that one MP", choice, got, smiths[i])
+			}
+		})
+	}
+}
+
+// Slice C2 (ratchet): an UNAMBIGUOUS /follow still just follows, offering no choices. This
+// passes the moment Reply grows the field and is not what drives the slice — it stops the
+// green being reached by attaching a menu to every reply, which would satisfy the test above
+// while making the common case worse.
+func TestHandleUpdate_follow_singleMatch_offersNoChoices(t *testing.T) {
+	store := bot.NewMemoryStore()
+	b := bot.New(store, knownMPs("Keir Starmer"))
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Keir Starmer"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/follow Keir Starmer) returned error: %v", err)
+	}
+
+	if len(store.Follows(9)) != 1 {
+		t.Fatalf("store.Follows(9) = %v, want the single match followed outright", store.Follows(9))
+	}
+	if len(reply.Choices) != 0 {
+		t.Errorf("reply offered choices %q for an unambiguous name, want none — there is nothing to choose", reply.Choices)
+	}
+}
