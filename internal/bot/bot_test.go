@@ -1324,3 +1324,148 @@ func TestHandleUpdate_follow_singleMatch_offersNoChoices(t *testing.T) {
 		t.Errorf("reply offered choices %q for an unambiguous name, want none — there is nothing to choose", reply.Choices)
 	}
 }
+
+// Slice C3: /unfollow matches the chat's OWN follow list the way /follow matches Parliament —
+// by SUBSTRING, not by exact equality. A chat following "Cat Smith" who types "/unfollow Smith"
+// is plainly asking to stop following her, but UnfollowMP compares f.Name != mp, so the typed
+// fragment matches nothing and the bot insists she was never followed while /list is still
+// listing her. One word, one user, two different matching rules.
+//
+// The matching stays against the STORE and never reaches the resolver. A follow list is local
+// data: routing it through the Members API would make unfollowing fail during an outage, and
+// because the resolver filters on IsCurrentMember=true, an MP who stood down would stop
+// resolving and could never be unfollowed again.
+//
+// The "you weren't following them" reply is captured behaviorally from a chat that follows
+// someone the fragment cannot match, so no wording is pinned here — and that reference is
+// stable across this slice, since "Rishi Sunak" contains "Smith" under neither rule.
+func TestHandleUpdate_unfollowPartialName_removesTheFollowItMatches(t *testing.T) {
+	const followed = "Cat Smith"
+	const typed = "Smith"
+
+	// Reference: what the bot says when the fragment genuinely matches nothing followed.
+	const unrelated = "Rishi Sunak"
+	missStore := bot.NewMemoryStore()
+	missBot := bot.New(missStore, knownMPs(unrelated))
+	if _, err := missBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + unrelated}); err != nil {
+		t.Fatalf("reference follow setup failed: %v", err)
+	}
+	notFollowing, err := missBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/unfollow " + typed})
+	if err != nil {
+		t.Fatalf("reference unfollow failed: %v", err)
+	}
+
+	// The chat under test follows exactly one MP, whose name CONTAINS the typed fragment.
+	store := bot.NewMemoryStore()
+	b := bot.New(store, knownMPs(followed))
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + followed}); err != nil {
+		t.Fatalf("follow setup failed: %v", err)
+	}
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/unfollow " + typed})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/unfollow %q) returned error: %v", typed, err)
+	}
+
+	// The load-bearing assertion: she is actually gone.
+	if got := store.Follows(42); len(got) != 0 {
+		t.Fatalf("store.Follows(42) = %v, want empty — %q should have matched the followed %q", got, typed, followed)
+	}
+	// ...and the bot reports a removal, not a miss. Without this, a green that deleted her
+	// while still saying "you were not following this MP" would pass.
+	if reply.Text == notFollowing.Text {
+		t.Errorf("reply %q is the not-following message, but %q was removed; want a removal confirmation", reply.Text, followed)
+	}
+	// Ratchet: passes today and must keep passing — the answer goes back to the asking chat.
+	if reply.ChatID != 42 {
+		t.Errorf("reply addressed to chat %d, want 42", reply.ChatID)
+	}
+	// Ratchet (added on C4's green): the confirmation names the MP actually removed, not the
+	// fragment that was typed. "You have unfollowed Smith." is true of nobody in particular,
+	// and once a fragment can match several follows it stops being a harmless shorthand.
+	if !strings.Contains(reply.Text, followed) {
+		t.Errorf("reply %q does not name %q; the confirmation should say who was removed, not what was typed", reply.Text, followed)
+	}
+	// Ratchet (added on C4's green): an UNAMBIGUOUS unfollow just removes, offering no menu.
+	// Stops the ambiguous case being satisfied by attaching choices to every reply.
+	if len(reply.Choices) != 0 {
+		t.Errorf("reply offered choices %q for a fragment matching one follow, want none — there is nothing to choose", reply.Choices)
+	}
+}
+
+// Slice C4: /unfollow a fragment SEVERAL of the chat's follows share removes NOBODY and
+// offers one choice per match — C2's design applied to the other direction. C3 made
+// "/unfollow Smith" match by substring, which immediately raises the question C2 already
+// answered for /follow: if the fragment fits two of your follows, removing either one is a
+// guess, and a wrong guess silently unsubscribes someone from an MP they wanted.
+//
+// The asymmetry with /follow is worth naming: /follow disambiguates against PARLIAMENT (11
+// sitting Smiths), /unfollow disambiguates against YOUR OWN LIST (however many Smiths you
+// happen to follow). So the matching here reads the store, never the resolver — an outage,
+// or an MP who has since stood down and no longer resolves, must not strand a follow.
+//
+// As in C2 the load-bearing assertion REPLAYS each choice through HandleUpdate, because
+// that is the only way to tell a working command from a plausible-looking label.
+func TestHandleUpdate_unfollow_severalFollowsMatch_removesNoneAndOffersChoices(t *testing.T) {
+	names := []string{"Cat Smith", "Greg Smith"}
+
+	// A chat that follows both Smiths. Built fresh per arm: replaying a choice needs a
+	// pristine list, and reading the members back out of the store rather than hardcoding
+	// them keeps the test independent of how knownMPs assigns IDs.
+	followingBoth := func(t *testing.T) (*bot.MemoryStore, *bot.Bot) {
+		t.Helper()
+		store := bot.NewMemoryStore()
+		b := bot.New(store, knownMPs(names...))
+		for _, n := range names {
+			if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + n}); err != nil {
+				t.Fatalf("follow setup for %q failed: %v", n, err)
+			}
+		}
+		return store, b
+	}
+
+	store, b := followingBoth(t)
+	want := append([]bot.Member(nil), store.Follows(42)...)
+	if len(want) != len(names) {
+		t.Fatalf("setup recorded %v, want %d follows", want, len(names))
+	}
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/unfollow Smith"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/unfollow Smith) returned error: %v", err)
+	}
+
+	// Assert: an ambiguous unfollow commits to nothing. Dropping either one is the bug.
+	got := store.Follows(42)
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("store.Follows(42) = %v, want %v unchanged until the user has chosen", got, want)
+	}
+
+	// Assert: Telegram will not send a message with no text, so a bare menu is unsendable.
+	if reply.Text == "" {
+		t.Error("/unfollow with several matches replied with empty text, want a sentence explaining the choice")
+	}
+	if reply.ChatID != 42 {
+		t.Errorf("reply addressed to chat %d, want 42", reply.ChatID)
+	}
+	if len(reply.Choices) != len(want) {
+		t.Fatalf("reply offered %d choices %q, want one per matching follow (%d)", len(reply.Choices), reply.Choices, len(want))
+	}
+
+	// Assert: every choice actually works, and unfollows the ONE MP it was offered for,
+	// leaving the other in place. Order follows the stored list, so the nth choice is want[n].
+	for i, choice := range reply.Choices {
+		t.Run(choice, func(t *testing.T) {
+			chosenStore, chosen := followingBoth(t)
+
+			if _, err := chosen.HandleUpdate(bot.Update{ChatID: 42, Text: choice}); err != nil {
+				t.Fatalf("replaying choice %q returned error: %v", choice, err)
+			}
+
+			left := chosenStore.Follows(42)
+			if len(left) != 1 || left[0] != want[1-i] {
+				t.Errorf("sending choice %q back left %v, want exactly %v — a choice must be a message that unfollows that one MP", choice, left, want[1-i])
+			}
+		})
+	}
+}
