@@ -104,18 +104,19 @@ func (s *MemoryStore) FollowMP(chatID int64, mp Member) {
 	s.follows[chatID] = append(s.follows[chatID], mp)
 }
 
-// UnfollowMP removes the MP named mp from chatID's follow list, leaving any others intact.
-// Go has no built-in slice remove, so it filters in place: kept items are
-// appended back over the same backing array.
+// UnfollowMP removes the MP with the given member ID from chatID's follow list, leaving any
+// others intact, and reports whether it was there to remove. Go has no built-in slice remove,
+// so it filters in place: kept items are appended back over the same backing array.
 //
-// Matching is still by NAME, because a name is what the user types. That makes it the one
-// place a stored ID is not yet load-bearing — unfollowing by ID needs a way for the user to
-// name one, so it waits for the disambiguation slice that gives them the choice.
-func (s *MemoryStore) UnfollowMP(chatID int64, mp string) bool {
+// It takes an ID, not a name, for the same reason FollowMP takes an already-resolved Member:
+// the store keeps identities, and working out WHICH member a typed name meant is the caller's
+// job, because the caller is the only layer with a user it can ask. Matching here as well
+// would mean the same decision being made in two places, and only one of them can ask.
+func (s *MemoryStore) UnfollowMP(chatID int64, id int) bool {
 	keep := s.follows[chatID][:0]
 	removed := false
 	for _, f := range s.follows[chatID] {
-		if f.Name != mp {
+		if f.ID != id {
 			keep = append(keep, f)
 		} else {
 			removed = true
@@ -223,6 +224,25 @@ func memberNames(members []Member) []string {
 	return names
 }
 
+// matchingFollows returns the MPs in follows whose display name contains fragment.
+//
+// Unfollowing searches the chat's OWN list and never the Members API. A follow list is local
+// data, and going to the network to interpret it would mean an outage could stop you cancelling
+// a subscription — worse, the resolver only finds SITTING members, so an MP who stood down
+// would stop resolving and the follow could never be removed at all.
+//
+// Substring, to mirror what B3's probing found the real API does, so "Smith" picks out the same
+// people whether the user is following or unfollowing.
+func matchingFollows(follows []Member, fragment string) []Member {
+	var matches []Member
+	for _, f := range follows {
+		if strings.Contains(f.Name, fragment) {
+			matches = append(matches, f)
+		}
+	}
+	return matches
+}
+
 // HandleUpdate processes an update and returns a reply.
 //
 // Note the return values are NOT the usual either/or: a non-nil error still carries a
@@ -294,11 +314,29 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		if name == "" {
 			return reply(update.ChatID, "Please enter an MP's name to unfollow."), nil
 		}
-		removed := b.store.UnfollowMP(update.ChatID, name)
-		if !removed {
+		matches := matchingFollows(b.store.Follows(update.ChatID), name)
+		if len(matches) == 0 {
 			return reply(update.ChatID, "You were not following this MP."), nil
 		}
-		return reply(update.ChatID, "You have unfollowed "+name+"."), nil
+		// Several of this chat's follows share the fragment, so removing one would be a
+		// guess — the same argument as /follow above, answered the same stateless way. Each
+		// choice is the command that unfollows exactly one of them; see Reply.Choices.
+		//
+		// KNOWN DEBT: following the same MP twice stores them twice, so two identical choices
+		// would be offered and neither could ever resolve. Dedup on FollowMP is its own slice.
+		if len(matches) > 1 {
+			r := reply(update.ChatID, "Several MPs you follow match that name. Which one did you mean?")
+			for _, m := range matches {
+				r.Choices = append(r.Choices, "/unfollow "+m.Name)
+			}
+			return r, nil
+		}
+		// The match came out of this chat's own list, so removal cannot fail and the bool
+		// UnfollowMP returns has nothing left to tell us. The confirmation names the MP
+		// actually removed rather than what was typed: "Smith" is not who you unfollowed.
+		mp := matches[0]
+		b.store.UnfollowMP(update.ChatID, mp.ID)
+		return reply(update.ChatID, "You have unfollowed "+mp.Name+"."), nil
 	case "/list":
 		follows := b.store.Follows(update.ChatID)
 		if len(follows) == 0 {
