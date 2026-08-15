@@ -12,14 +12,19 @@ import (
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
 
-// fakeSource is an in-memory ActivitySource: canned activity items keyed by MP, so the
-// poll slice stays offline (real HTTP feeds arrive in Phase C).
+// fakeSource is an in-memory ActivitySource: canned activity items keyed by member ID, so
+// the poll slice stays offline (real HTTP feeds arrive in Phase C).
+//
+// It is keyed by ID and knows no names at all, which is deliberate: the display name a
+// follow record holds is a snapshot taken when the user followed, and nothing keeps it in
+// sync with Parliament. Two sitting MPs can also share one display name outright. A fake
+// that could be asked for activity by name would let that mistake back in unnoticed.
 type fakeSource struct {
-	items map[string][]bot.Activity
+	items map[int][]bot.Activity
 }
 
-func (f fakeSource) Activity(mp string) []bot.Activity {
-	return f.items[mp]
+func (f fakeSource) Activity(memberID int) []bot.Activity {
+	return f.items[memberID]
 }
 
 // fakeResolver is an in-memory name resolver: canned matches keyed by the query. Handler
@@ -259,6 +264,61 @@ func TestResolver_ResolveName_multipleMatches_returnsThemAll(t *testing.T) {
 	}
 }
 
+// Slice C5 (Phase C): activity is fetched by member ID, not by display name. Two sitting
+// MPs can share one display name — B3's live probing of the Members API found "Smith"
+// matching 11 sitting members, and matching is substring, so ambiguity cannot be filtered
+// away. Polling by name therefore cannot tell two such MPs apart, and every follower of
+// either one would be sent both MPs' activity.
+//
+// The two followers are in SEPARATE chats deliberately. Already-sent suppression is
+// per-chat, so it cannot quietly absorb the duplicate the way it would if one chat
+// followed both: each chat's extra item would be a first sighting for that chat and
+// arrive. That makes the misrouting visible rather than masked.
+//
+// This is also what the durable ID stored since C0 is ultimately for. A follow record's
+// name is a snapshot from the moment the user followed and nothing keeps it in sync;
+// the ID is the only part of it that Parliament will still recognise later.
+func TestCheckActivity_twoMPsShareADisplayName_eachChatGetsOnlyItsOwn(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.AddChat(2)
+
+	// Same display name, different people.
+	store.FollowMP(1, bot.Member{ID: 101, Name: "John Smith"})
+	store.FollowMP(2, bot.Member{ID: 102, Name: "John Smith"})
+
+	source := fakeSource{items: map[int][]bot.Activity{
+		101: {{ID: "s7", Text: "spoke on housing"}},
+		102: {{ID: "v42", Text: "voted on Bill 42"}},
+	}}
+
+	replies := bot.CheckActivity(source, store)
+
+	// One item each. Under name-based polling both chats would receive both items.
+	if len(replies) != 2 {
+		t.Fatalf("got %d replies, want 2 (one per chat)", len(replies))
+	}
+
+	// Assert which chat got WHICH item, not just how many arrived. A count alone would
+	// pass if the two items were delivered to the same chat, or swapped between them.
+	want := map[int64]string{
+		1: "spoke on housing",
+		2: "voted on Bill 42",
+	}
+	got := make(map[int64]string, len(replies))
+	for _, r := range replies {
+		if _, dup := got[r.ChatID]; dup {
+			t.Fatalf("chat %d received more than one item", r.ChatID)
+		}
+		got[r.ChatID] = r.Text
+	}
+	for chatID, text := range want {
+		if !strings.Contains(got[chatID], text) {
+			t.Errorf("chat %d got %q, want it to mention %q", chatID, got[chatID], text)
+		}
+	}
+}
+
 // Slice 10 (Phase D, poll loop — newness half): polling twice must not re-push an item
 // already sent to a chat. The first CheckActivity delivers the item; the second, over the
 // same unchanged source, delivers nothing. This drives a per-chat "already sent" high-water
@@ -270,8 +330,8 @@ func TestCheckActivity_itemAlreadySent_notPushedAgain(t *testing.T) {
 	store.AddChat(1)
 	store.FollowMP(1, bot.Member{ID: 4514, Name: "Keir Starmer"})
 
-	source := fakeSource{items: map[string][]bot.Activity{
-		"Keir Starmer": {{ID: "v42", Text: "voted on Bill 42"}},
+	source := fakeSource{items: map[int][]bot.Activity{
+		4514: {{ID: "v42", Text: "voted on Bill 42"}},
 	}}
 
 	first := bot.CheckActivity(source, store)
@@ -295,8 +355,8 @@ func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
 	store.AddChat(1)
 	store.FollowMP(1, bot.Member{ID: 4514, Name: "Keir Starmer"})
 
-	source := fakeSource{items: map[string][]bot.Activity{
-		"Keir Starmer": {{ID: "v42", Text: "voted on Bill 42"}},
+	source := fakeSource{items: map[int][]bot.Activity{
+		4514: {{ID: "v42", Text: "voted on Bill 42"}},
 	}}
 
 	replies := bot.CheckActivity(source, store)
