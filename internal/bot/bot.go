@@ -69,6 +69,7 @@ type NameResolver interface {
 type Bot struct {
 	store    *MemoryStore
 	resolver NameResolver
+	source   ActivitySource
 }
 
 // New returns a Bot that records subscriptions and follows in store, and looks MPs up
@@ -78,8 +79,8 @@ type Bot struct {
 // once a name is supplied, since both reject an empty name before making any request.
 // Every other command works with a nil resolver, and the tests pass nil deliberately to
 // record that they never reach the network.
-func New(store *MemoryStore, resolver NameResolver) *Bot {
-	return &Bot{store: store, resolver: resolver}
+func New(store *MemoryStore, resolver NameResolver, source ActivitySource) *Bot {
+	return &Bot{store: store, resolver: resolver, source: source}
 }
 
 // NewMemoryStore returns a ready to use *MemoryStore
@@ -354,6 +355,26 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		// The store carries each MP's name alongside their ID precisely so this needs no
 		// lookup: /list stays offline, and cannot fail because the Members API is down.
 		return reply(update.ChatID, "You follow: "+strings.Join(memberNames(follows), ", ")), nil
+	case "/latest":
+		// Fetched live rather than read from the store: unlike /list, this command cannot
+		// answer offline, because the whole point of it is what Parliament says right now.
+		follows := b.store.Follows(update.ChatID)
+		var texts []string
+		for _, mp := range follows {
+			activity := b.source.Activity(mp.ID)
+			for _, a := range activity {
+				// Attribution is built HERE because this is the only point in the function
+				// where both halves are in scope at once — which MP, and which item. One
+				// line later mp is gone, and nothing downstream can reconstruct whose item
+				// this was. It is also why ActivitySource takes a bare ID: the name never
+				// has to make the round trip.
+				texts = append(texts, mp.Name+": "+a.Text)
+			}
+		}
+		// Deliberate debt, its own slice: a chat that follows nobody gets an empty reply
+		// here — the dangling-string shape slice 11 fixed for /list and B6 for /find.
+		// Reading nothing is NOT recorded as sent; see the ratchet in this slice's test.
+		return reply(update.ChatID, strings.Join(texts, "\n")), nil
 	case "/help":
 		return reply(update.ChatID,
 			"Follow MPs by typing their name or the post code into /follow.\n"+
