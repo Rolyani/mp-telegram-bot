@@ -39,10 +39,19 @@ type Activity struct {
 	Text string
 }
 
-// ActivitySource fetches the recent activity for a given MP. Implementations may hit the
-// Parliament APIs; tests supply an in-memory fake.
+// ActivitySource fetches the recent activity for one MP, identified by their Parliament
+// member ID. Implementations may hit the Parliament APIs; tests supply an in-memory fake.
+//
+// It takes an ID rather than a name because a display name identifies nobody reliably:
+// two sitting MPs can share one, and the API matches names by substring, so the
+// ambiguity cannot be filtered away.
+//
+// It takes a bare ID rather than a whole Member so that a source has no name available
+// to key on even by accident. If a reply should mention the MP, that wording belongs to
+// CheckActivity, which is already holding the Member — the same split as elsewhere: the
+// layer that fetches fetches, the layer with a user does the words.
 type ActivitySource interface {
-	Activity(mp string) []Activity
+	Activity(memberID int) []Activity
 }
 
 // NameResolver looks up sitting MPs by name, returning every match so the caller can offer
@@ -151,18 +160,18 @@ func Broadcast(msg string, store *MemoryStore) []Reply {
 }
 
 // CheckActivity polls the source for every followed MP and builds one reply per activity
-// item, addressed to each chat that follows that MP. It does not yet suppress
-// already-sent items — that's the next slice.
+// item, addressed to each chat that follows that MP. An item already sent to a chat is
+// not sent again, so each follower sees a given item exactly once.
 func CheckActivity(source ActivitySource, store *MemoryStore) []Reply {
 	chats := store.Chats()
 	replies := make([]Reply, 0, len(chats))
 	for _, id := range chats {
 		follows := store.Follows(id)
 		for _, mp := range follows {
-			// Still polled by NAME. Fetching activity by member ID is what the stored ID
-			// is ultimately for, but changing ActivitySource's signature is Phase C's own
-			// slice and needs its own failing test — not a passenger on this one.
-			data := source.Activity(mp.Name)
+			// Polled by ID, never by name. The name in a follow record is a snapshot
+			// taken when the user followed and nothing keeps it in sync; the ID is the
+			// only part of it Parliament will still recognise later.
+			data := source.Activity(mp.ID)
 			for _, act := range data {
 				if store.WasSent(id, act.ID) {
 					continue
