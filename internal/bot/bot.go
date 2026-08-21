@@ -359,6 +359,9 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		// Fetched live rather than read from the store: unlike /list, this command cannot
 		// answer offline, because the whole point of it is what Parliament says right now.
 		follows := b.store.Follows(update.ChatID)
+		if len(follows) == 0 {
+			return reply(update.ChatID, "You are not following any MPs yet."), nil
+		}
 		var texts []string
 		for _, mp := range follows {
 			activity := b.source.Activity(mp.ID)
@@ -371,9 +374,11 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 				texts = append(texts, mp.Name+": "+a.Text)
 			}
 		}
-		// Deliberate debt, its own slice: a chat that follows nobody gets an empty reply
-		// here — the dangling-string shape slice 11 fixed for /list and B6 for /find.
-		// Reading nothing is NOT recorded as sent; see the ratchet in this slice's test.
+		if len(texts) == 0 {
+			return reply(update.ChatID, "Your followed MPs have not made any contributions yet."), nil
+		}
+		// Reading is not delivering: /latest deliberately does not MarkSent, so the poll
+		// loop still owes the user these items. Ratcheted in the /latest tests.
 		return reply(update.ChatID, strings.Join(texts, "\n")), nil
 	case "/help":
 		return reply(update.ChatID,

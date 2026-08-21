@@ -343,6 +343,93 @@ func TestHandleUpdate_latest_repliesWithActivityForEveryFollowedMP(t *testing.T)
 	}
 }
 
+// Slice C7 (Phase C): /latest has TWO ways to come back empty, and they are different
+// situations, so they must not say the same thing. A chat that follows nobody should be
+// told to go and follow someone; a chat whose MPs have simply been quiet should be told
+// there is nothing new. Today both produce strings.Join(nil, "\n") — a blank reply — the
+// dangling-string shape slice 11 fixed for /list and B6 for /find.
+//
+// This is the same principle already stated at bot.go:223 for /find: "asked and nobody
+// matched" and "could not ask" are distinct answers the user can act on differently.
+// Collapsing these two would tell someone following three MPs that they follow nobody.
+//
+// Wording is not pinned — only that each reply is non-empty and that the two differ.
+func TestHandleUpdate_latest_emptyCases_saySomethingAndDiffer(t *testing.T) {
+	// Case 1: the chat follows nobody.
+	//
+	// nil source, deliberately: with no follows there is nothing to fetch, so /latest
+	// must never reach for activity here. A panic is the assertion.
+	noFollows := bot.NewMemoryStore()
+	noFollows.AddChat(1)
+
+	nobody, err := bot.New(noFollows, nil, nil).HandleUpdate(bot.Update{ChatID: 1, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest with no follows returned error: %v", err)
+	}
+	if nobody.ChatID != 1 {
+		t.Errorf("reply addressed to chat %d, want 1", nobody.ChatID)
+	}
+	if strings.TrimSpace(nobody.Text) == "" {
+		t.Error("/latest with no follows replied with blank text, want a message saying you follow nobody")
+	}
+
+	// Case 2: the chat follows two MPs and neither has done anything. The source knows
+	// both members and answers for both — it just has nothing to report, which is a
+	// normal, successful answer and not a failure.
+	quiet := bot.NewMemoryStore()
+	quiet.AddChat(2)
+	quiet.FollowMP(2, bot.Member{ID: 101, Name: "Cat Smith"})
+	quiet.FollowMP(2, bot.Member{ID: 102, Name: "Greg Smith"})
+
+	silent := fakeSource{items: map[int][]bot.Activity{
+		101: {},
+		102: {},
+	}}
+
+	nothingNew, err := bot.New(quiet, nil, silent).HandleUpdate(bot.Update{ChatID: 2, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest with quiet MPs returned error: %v", err)
+	}
+	if nothingNew.ChatID != 2 {
+		t.Errorf("reply addressed to chat %d, want 2", nothingNew.ChatID)
+	}
+	if strings.TrimSpace(nothingNew.Text) == "" {
+		t.Error("/latest with quiet MPs replied with blank text, want a message saying there is nothing new")
+	}
+
+	// The two must be told apart. This is what stops the single len(texts) == 0 guard:
+	// that one guard cannot distinguish "you follow nobody" from "nobody did anything",
+	// so it would tell a chat following two MPs that it follows none.
+	if nothingNew.Text == nobody.Text {
+		t.Errorf("both empty cases replied %q; a chat following 2 MPs must not be told it follows nobody", nobody.Text)
+	}
+
+	// Case 3: one quiet MP and one active one. The quiet MP must not suppress the other.
+	//
+	// This case exists because cases 1 and 2 do not constrain WHERE the second guard
+	// goes: with every followed MP quiet, a guard inside the follows loop returns the
+	// same right answer as one placed after it. Only a mixed follow list tells them
+	// apart — and only when the quiet MP is reached FIRST, which is why Cat (quiet)
+	// sorts before Greg (active) in the follow order below.
+	mixed := bot.NewMemoryStore()
+	mixed.AddChat(3)
+	mixed.FollowMP(3, bot.Member{ID: 101, Name: "Cat Smith"})
+	mixed.FollowMP(3, bot.Member{ID: 102, Name: "Greg Smith"})
+
+	partial := fakeSource{items: map[int][]bot.Activity{
+		101: {},
+		102: {{ID: "v42", Text: "voted on Bill 42"}},
+	}}
+
+	some, err := bot.New(mixed, nil, partial).HandleUpdate(bot.Update{ChatID: 3, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest with one quiet MP returned error: %v", err)
+	}
+	if !strings.Contains(some.Text, "voted on Bill 42") {
+		t.Errorf("/latest replied %q, losing the active MP's item; a followed MP with no activity must not cut the walk short", some.Text)
+	}
+}
+
 // Slice C5 (Phase C): activity is fetched by member ID, not by display name. Two sitting
 // MPs can share one display name — B3's live probing of the Members API found "Smith"
 // matching 11 sitting members, and matching is substring, so ambiguity cannot be filtered
