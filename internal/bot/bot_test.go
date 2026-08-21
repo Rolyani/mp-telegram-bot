@@ -338,7 +338,7 @@ func TestHandleUpdate_latest_repliesWithActivityForEveryFollowedMP(t *testing.T)
 	}
 
 	// RATCHET: reading is not delivering — the poll loop still owes the user both items.
-	if pushed := bot.CheckActivity(source, store); len(pushed) != 2 {
+	if pushed := b.CheckActivity(); len(pushed) != 2 {
 		t.Errorf("poll delivered %d items after /latest, want 2: /latest must not mark items sent", len(pushed))
 	}
 }
@@ -371,7 +371,7 @@ func TestCheckActivity_twoMPsShareADisplayName_eachChatGetsOnlyItsOwn(t *testing
 		102: {{ID: "v42", Text: "voted on Bill 42"}},
 	}}
 
-	replies := bot.CheckActivity(source, store)
+	replies := bot.New(store, nil, source).CheckActivity()
 
 	// One item each. Under name-based polling both chats would receive both items.
 	if len(replies) != 2 {
@@ -413,12 +413,14 @@ func TestCheckActivity_itemAlreadySent_notPushedAgain(t *testing.T) {
 		4514: {{ID: "v42", Text: "voted on Bill 42"}},
 	}}
 
-	first := bot.CheckActivity(source, store)
+	b := bot.New(store, nil, source)
+
+	first := b.CheckActivity()
 	if len(first) != 1 {
 		t.Fatalf("first poll: got %d replies, want 1", len(first))
 	}
 
-	second := bot.CheckActivity(source, store)
+	second := b.CheckActivity()
 	if len(second) != 0 {
 		t.Errorf("second poll re-pushed %d already-sent item(s), want 0", len(second))
 	}
@@ -438,7 +440,7 @@ func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
 		4514: {{ID: "v42", Text: "voted on Bill 42"}},
 	}}
 
-	replies := bot.CheckActivity(source, store)
+	replies := bot.New(store, nil, source).CheckActivity()
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1", len(replies))

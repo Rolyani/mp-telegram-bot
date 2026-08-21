@@ -163,22 +163,22 @@ func Broadcast(msg string, store *MemoryStore) []Reply {
 // CheckActivity polls the source for every followed MP and builds one reply per activity
 // item, addressed to each chat that follows that MP. An item already sent to a chat is
 // not sent again, so each follower sees a given item exactly once.
-func CheckActivity(source ActivitySource, store *MemoryStore) []Reply {
-	chats := store.Chats()
+func (b *Bot) CheckActivity() []Reply {
+	chats := b.store.Chats()
 	replies := make([]Reply, 0, len(chats))
 	for _, id := range chats {
-		follows := store.Follows(id)
+		follows := b.store.Follows(id)
 		for _, mp := range follows {
 			// Polled by ID, never by name. The name in a follow record is a snapshot
 			// taken when the user followed and nothing keeps it in sync; the ID is the
 			// only part of it Parliament will still recognise later.
-			data := source.Activity(mp.ID)
+			data := b.source.Activity(mp.ID)
 			for _, act := range data {
-				if store.WasSent(id, act.ID) {
+				if b.store.WasSent(id, act.ID) {
 					continue
 				}
 				replies = append(replies, Reply{ChatID: id, Text: act.Text})
-				store.MarkSent(id, act.ID)
+				b.store.MarkSent(id, act.ID)
 			}
 		}
 	}
