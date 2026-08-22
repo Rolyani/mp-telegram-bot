@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
@@ -427,6 +428,49 @@ func TestHandleUpdate_latest_emptyCases_saySomethingAndDiffer(t *testing.T) {
 	}
 	if !strings.Contains(some.Text, "voted on Bill 42") {
 		t.Errorf("/latest replied %q, losing the active MP's item; a followed MP with no activity must not cut the walk short", some.Text)
+	}
+}
+
+// Slice C8a (Phase C): /latest says WHEN each item happened.
+//
+// This is the slice that puts a timestamp on Activity, and RENDERING it is deliberately the
+// smallest thing that forces the field to exist. Ordering by it is a separate behavior and
+// comes next: a feed can be dated without being sorted, and sorted without being dated, so
+// proving the two apart keeps each red pointing at exactly one fault.
+//
+// Layout is NOT pinned. The assertion is that the date reaches the item's line — the one new
+// fact this slice adds — not that it sits in parentheses, or before the colon, or after the
+// name. Wording and separator stayed free in C6 and stay free here. The one thing it does fix
+// is the SHAPE of the date: day then abbreviated month, which is Go's "2 Jan" layout.
+func TestHandleUpdate_latest_datesEachItem(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, bot.Member{ID: 101, Name: "Cat Smith"})
+
+	// A FIXED date, never time.Now(): a test that builds its expectation from the clock
+	// agrees with any implementation that also reads the clock, including one that ignores
+	// the item entirely and stamps every line with today. Six months away from today makes
+	// that particular wrong answer impossible to mistake for a right one.
+	spokeOn := time.Date(2026, time.February, 3, 14, 30, 0, 0, time.UTC)
+
+	source := fakeSource{items: map[int][]bot.Activity{
+		101: {{ID: "s7", Text: "spoke on housing", When: spokeOn}},
+	}}
+
+	// nil resolver: /latest looks up no names, and the nil enforces that it never tries.
+	reply, err := bot.New(store, nil, source).HandleUpdate(bot.Update{ChatID: 1, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest returned error: %v", err)
+	}
+
+	// What C6 established must survive: the date is ADDED to the line, not swapped in for the
+	// attribution or the item text. A slice that adds a fact should not quietly drop one.
+	if !strings.Contains(reply.Text, "Cat Smith") || !strings.Contains(reply.Text, "spoke on housing") {
+		t.Fatalf("/latest replied %q, want it to still name the MP and describe the item", reply.Text)
+	}
+
+	if !strings.Contains(reply.Text, "3 Feb") {
+		t.Errorf("/latest replied %q, want the item dated 3 Feb alongside it", reply.Text)
 	}
 }
 
