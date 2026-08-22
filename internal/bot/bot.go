@@ -1,6 +1,9 @@
 package bot
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // Update represents an incoming message
 type Update struct {
@@ -33,10 +36,20 @@ type MemoryStore struct {
 }
 
 // Activity is one item of an MP's parliamentary activity (a vote, question, or speech).
-// ID uniquely identifies the item so it can be de-duplicated; Text is what subscribers see.
+// ID uniquely identifies the item so it can be de-duplicated; Text is what subscribers see;
+// When is when PARLIAMENT recorded the item, not when we fetched it — which is the only
+// reading that lets /latest mean latest, since fetch time is the same for everything in a
+// batch and orders nothing.
+//
+// ⚠️ A missing When cannot be detected. time.Time's zero value is a valid instant — midnight
+// on 1 January, year 1 — that formats and compares without complaint, so an unset field
+// becomes a confident wrong answer (an item dated "1 January 0001") rather than a failure.
+// Nothing here can defend against that; only a source that always sets it, and tests that
+// notice when one doesn't.
 type Activity struct {
 	ID   string
 	Text string
+	When time.Time
 }
 
 // ActivitySource fetches the recent activity for one MP, identified by their Parliament
@@ -371,7 +384,11 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 				// line later mp is gone, and nothing downstream can reconstruct whose item
 				// this was. It is also why ActivitySource takes a bare ID: the name never
 				// has to make the round trip.
-				texts = append(texts, mp.Name+": "+a.Text)
+				//
+				// The date is stitched on here for the mirror-image reason: a is gone one
+				// line later, and a finished string carries no timestamp — so anything
+				// wanting to ORDER by recency has to happen before this point, not after.
+				texts = append(texts, mp.Name+": "+a.When.Format("2 January 2006")+", "+a.Text)
 			}
 		}
 		if len(texts) == 0 {
