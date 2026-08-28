@@ -474,6 +474,144 @@ func TestHandleUpdate_latest_datesEachItem(t *testing.T) {
 	}
 }
 
+// Slice C8b (Phase C): /latest lists one MP's items newest-first. C8a put a date on every
+// line; a date the reader has to scan for the biggest number is only half the job, and
+// "latest" is a promise about ORDER, not just about content.
+//
+// The fixture's three items are deliberately SCRAMBLED rather than merely reversed, and
+// that choice is the whole strength of this test. Source order here is middle, oldest,
+// newest — so every cheap wrong answer produces a visibly different list:
+//
+//	as fetched (no sort at all)  -> 3 Feb, 1 Feb, 5 Feb
+//	reverse the slice           -> 5 Feb, 1 Feb, 3 Feb
+//	sort OLDEST-first           -> 1 Feb, 3 Feb, 5 Feb
+//	sort NEWEST-first           -> 5 Feb, 3 Feb, 1 Feb   <- the only one that passes
+//
+// A fixture already in oldest-first order would have let a plain reversal pass, and one
+// already newest-first would have passed with no implementation at all. Both are the
+// failure mode C7 caught and C8a's own demo tripped over: something that agrees with the
+// right answer by coincidence tells you nothing.
+//
+// The assertions read the reply LINE BY LINE and only require each line to CONTAIN its
+// item, rather than pinning the finished "Name: date, text" string. Order is what this
+// slice is about; the wording is C8a's and is already ratcheted there, and a test that
+// re-froze it would turn any later rewording into two failures instead of one.
+func TestHandleUpdate_latest_ordersOneMPsItemsNewestFirst(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, bot.Member{ID: 101, Name: "Cat Smith"})
+
+	// Fixed dates, never time.Now() — same reasoning as C8a: an expectation built from the
+	// clock agrees with an implementation that also reads the clock.
+	var (
+		newest = time.Date(2026, time.February, 5, 9, 0, 0, 0, time.UTC)
+		middle = time.Date(2026, time.February, 3, 14, 30, 0, 0, time.UTC)
+		oldest = time.Date(2026, time.February, 1, 11, 15, 0, 0, time.UTC)
+	)
+
+	source := fakeSource{items: map[int][]bot.Activity{
+		101: {
+			{ID: "s7", Text: "spoke on housing", When: middle},
+			{ID: "q3", Text: "asked about rail fares", When: oldest},
+			{ID: "v9", Text: "voted on the finance bill", When: newest},
+		},
+	}}
+
+	// nil resolver: /latest looks up no names, and the nil enforces that it never tries.
+	reply, err := bot.New(store, nil, source).HandleUpdate(bot.Update{ChatID: 1, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest returned error: %v", err)
+	}
+
+	want := []string{
+		"voted on the finance bill",
+		"spoke on housing",
+		"asked about rail fares",
+	}
+
+	lines := strings.Split(reply.Text, "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("/latest replied %q, want %d lines, got %d", reply.Text, len(want), len(lines))
+	}
+
+	// Errorf, not Fatalf: if the order is wrong, seeing every misplaced line at once says
+	// which rearrangement happened, where stopping at the first only says "not this".
+	for i, item := range want {
+		if !strings.Contains(lines[i], item) {
+			t.Errorf("/latest line %d is %q, want it to be the item %q (full reply %q)", i+1, lines[i], item, reply.Text)
+		}
+	}
+}
+
+// Slice C8b, second half: an item with no date says so, and sinks to the bottom.
+//
+// This is the hole C8a opened and deferred to here. time.Time's zero value is not a null
+// and not an error — it is midnight on 1 January, year 1, a perfectly valid instant that
+// Format renders without complaint. So an Activity whose When was never set does not
+// crash and does not blank out; it produces "1 January 0001" and looks for all the world
+// like an item we successfully dated. That is worse than a failure, because nothing
+// anywhere reports it. Go has no null for a struct field, so a test is the only thing
+// that can hold this line.
+//
+// THREE assertions, and each one kills a different cheap implementation:
+//
+//   - the undated line says "date unknown"  — kills doing nothing at all
+//   - the DATED line still shows 3 February — kills stamping "date unknown" on everything,
+//     which a test that only looked at the undated item would happily pass
+//   - no "0001" survives anywhere           — names the actual hazard, so a future render
+//     that formats the zero value differently but still leaks year 1 is caught
+//
+// The undated item is deliberately placed FIRST in the fixture. It has to end up LAST, so
+// leaving the slice untouched cannot satisfy the ordering half by accident — the same
+// discipline as the scrambled fixture above. Sorting last already works today, for free,
+// because year 1 is older than everything; asserting it anyway is what stops a later
+// change to the comparator from quietly undoing it.
+func TestHandleUpdate_latest_undatedItem_saysDateUnknownAndSortsLast(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, bot.Member{ID: 101, Name: "Cat Smith"})
+
+	spokeOn := time.Date(2026, time.February, 3, 14, 30, 0, 0, time.UTC)
+
+	source := fakeSource{items: map[int][]bot.Activity{
+		101: {
+			// When omitted entirely — the zero value, exactly as a source that forgot to
+			// set it would leave things. Written as a bare missing field rather than an
+			// explicit time.Time{} because that is how it will really happen.
+			{ID: "q3", Text: "asked about rail fares"},
+			{ID: "s7", Text: "spoke on housing", When: spokeOn},
+		},
+	}}
+
+	// nil resolver: /latest looks up no names, and the nil enforces that it never tries.
+	reply, err := bot.New(store, nil, source).HandleUpdate(bot.Update{ChatID: 1, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest returned error: %v", err)
+	}
+
+	lines := strings.Split(reply.Text, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("/latest replied %q, want 2 lines, got %d — an undated item is still an item and must not be dropped", reply.Text, len(lines))
+	}
+
+	// The dated item, unchanged and still first.
+	if !strings.Contains(lines[0], "spoke on housing") || !strings.Contains(lines[0], "3 February 2026") {
+		t.Errorf("/latest line 1 is %q, want the dated item still reading 3 February 2026", lines[0])
+	}
+
+	// The undated item: last, honest about the gap, and still carrying its text.
+	if !strings.Contains(lines[1], "asked about rail fares") {
+		t.Errorf("/latest line 2 is %q, want the undated item last and still described", lines[1])
+	}
+	if !strings.Contains(lines[1], "date unknown") {
+		t.Errorf("/latest line 2 is %q, want it to say the date is unknown rather than invent one", lines[1])
+	}
+
+	if strings.Contains(reply.Text, "0001") {
+		t.Errorf("/latest replied %q, want no year-1 date anywhere — that is the zero value leaking, not a real timestamp", reply.Text)
+	}
+}
+
 // Slice C5 (Phase C): activity is fetched by member ID, not by display name. Two sitting
 // MPs can share one display name — B3's live probing of the Members API found "Smith"
 // matching 11 sitting members, and matching is substring, so ambiguity cannot be filtered
