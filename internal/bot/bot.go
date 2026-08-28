@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -41,11 +42,15 @@ type MemoryStore struct {
 // reading that lets /latest mean latest, since fetch time is the same for everything in a
 // batch and orders nothing.
 //
-// ⚠️ A missing When cannot be detected. time.Time's zero value is a valid instant — midnight
-// on 1 January, year 1 — that formats and compares without complaint, so an unset field
-// becomes a confident wrong answer (an item dated "1 January 0001") rather than a failure.
-// Nothing here can defend against that; only a source that always sets it, and tests that
-// notice when one doesn't.
+// ⚠️ A missing When looks exactly like a real one. time.Time's zero value is a valid
+// instant — midnight on 1 January, year 1 — that formats and compares without complaint, so
+// an unset field becomes a confident wrong answer (an item dated "1 January 0001") rather
+// than a failure. Go offers no null here to tell the two apart. IsZero is the closest thing,
+// and it only works because no parliamentary record is genuinely dated year 1.
+//
+// /latest makes that check and prints "date unknown" instead. Nothing obliges a source to
+// set When in the first place, so anything else that learns to show a date owes the reader
+// the same check — and the tests are what will notice if it forgets.
 type Activity struct {
 	ID   string
 	Text string
@@ -378,6 +383,25 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		var texts []string
 		for _, mp := range follows {
 			activity := b.source.Activity(mp.ID)
+			// Newest first, and STABLE. Sorting has to happen here rather than further down
+			// for the reason the comment below gives: one line later the timestamp has been
+			// folded into a finished string and nothing can order by it any more.
+			//
+			// Stable is not fussiness — ties are the ordinary case here, not the edge. An MP
+			// votes and speaks several times in a sitting day, and Parliament's timestamps
+			// need not separate two items at all. An unstable sort would put such a day in an
+			// arbitrary order that also CHANGES with the number of items fetched; a stable one
+			// leaves tied items in the order Parliament sent them, which is the only ordering
+			// left once the dates have stopped distinguishing anything.
+			//
+			// Comparing y to x, rather than x to y, is the whole of what makes it descending.
+			//
+			// Note the scope: this orders each MP's items among THEMSELVES. The reply is still
+			// grouped by MP, so a recent item from the MP listed second still prints below an
+			// older one from the MP listed first.
+			slices.SortStableFunc(activity, func(x, y Activity) int {
+				return y.When.Compare(x.When)
+			})
 			for _, a := range activity {
 				// Attribution is built HERE because this is the only point in the function
 				// where both halves are in scope at once — which MP, and which item. One
@@ -388,7 +412,11 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 				// The date is stitched on here for the mirror-image reason: a is gone one
 				// line later, and a finished string carries no timestamp — so anything
 				// wanting to ORDER by recency has to happen before this point, not after.
-				texts = append(texts, mp.Name+": "+a.When.Format("2 January 2006")+", "+a.Text)
+				dateText := a.When.Format("2 January 2006")
+				if a.When.IsZero() {
+					dateText = "date unknown"
+				}
+				texts = append(texts, mp.Name+": "+dateText+", "+a.Text)
 			}
 		}
 		if len(texts) == 0 {
