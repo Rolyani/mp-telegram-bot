@@ -380,48 +380,71 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		if len(follows) == 0 {
 			return reply(update.ChatID, "You are not following any MPs yet."), nil
 		}
-		var texts []string
+
+		// One item, and whose it is.
+		//
+		// This type exists because /latest has to order items ACROSS MPs, and the fetch is
+		// necessarily per MP. Sorting each MP's items separately can only ever order them
+		// within their own group, so an item from weeks ago would still print above one from
+		// this morning whenever it belonged to an earlier follow. Interleaving needs every
+		// item in ONE list, and a bare Activity in that list could no longer say who it
+		// belonged to — the source is asked by member ID and never sees a name.
+		//
+		// Holding the Activity itself rather than a finished line is the point. A rendered
+		// string carries its date as prose, which cannot be compared; Activity carries a
+		// time.Time, which can. Attribution and rendering therefore happen AFTER the sort,
+		// and this type is what survives the journey.
+		//
+		// Declared here rather than beside Activity because nothing outside this command has
+		// any use for it.
+		type attributed struct {
+			mp       Member
+			activity Activity
+		}
+
+		// Flatten first: every followed MP's items into a single list, each still carrying
+		// its MP. This loop is the only place where both halves are in scope at once, which
+		// is why the pairing has to happen here even though the wording happens later.
+		var items []attributed
 		for _, mp := range follows {
-			activity := b.source.Activity(mp.ID)
-			// Newest first, and STABLE. Sorting has to happen here rather than further down
-			// for the reason the comment below gives: one line later the timestamp has been
-			// folded into a finished string and nothing can order by it any more.
-			//
-			// Stable is not fussiness — ties are the ordinary case here, not the edge. An MP
-			// votes and speaks several times in a sitting day, and Parliament's timestamps
-			// need not separate two items at all. An unstable sort would put such a day in an
-			// arbitrary order that also CHANGES with the number of items fetched; a stable one
-			// leaves tied items in the order Parliament sent them, which is the only ordering
-			// left once the dates have stopped distinguishing anything.
-			//
-			// Comparing y to x, rather than x to y, is the whole of what makes it descending.
-			//
-			// Note the scope: this orders each MP's items among THEMSELVES. The reply is still
-			// grouped by MP, so a recent item from the MP listed second still prints below an
-			// older one from the MP listed first.
-			slices.SortStableFunc(activity, func(x, y Activity) int {
-				return y.When.Compare(x.When)
-			})
-			for _, a := range activity {
-				// Attribution is built HERE because this is the only point in the function
-				// where both halves are in scope at once — which MP, and which item. One
-				// line later mp is gone, and nothing downstream can reconstruct whose item
-				// this was. It is also why ActivitySource takes a bare ID: the name never
-				// has to make the round trip.
-				//
-				// The date is stitched on here for the mirror-image reason: a is gone one
-				// line later, and a finished string carries no timestamp — so anything
-				// wanting to ORDER by recency has to happen before this point, not after.
-				dateText := a.When.Format("2 January 2006")
-				if a.When.IsZero() {
-					dateText = "date unknown"
-				}
-				texts = append(texts, mp.Name+": "+dateText+", "+a.Text)
+			for _, a := range b.source.Activity(mp.ID) {
+				items = append(items, attributed{mp: mp, activity: a})
 			}
 		}
-		if len(texts) == 0 {
+
+		if len(items) == 0 {
 			return reply(update.ChatID, "Your followed MPs have not made any contributions yet."), nil
 		}
+
+		// One sort over everything, newest first — this is what makes /latest mean latest
+		// rather than "latest, per MP, in follow order".
+		//
+		// STABLE, because ties are the ordinary case rather than the edge: two MPs speaking
+		// on the same sitting day is likelier than one MP doing so twice, and Parliament's
+		// timestamps need not separate them at all. A stable sort settles a tie in follow
+		// order, which is at least a reason; an unstable one would settle it arbitrarily and
+		// differently as the number of items changed.
+		//
+		// Comparing y to x, rather than x to y, is the whole of what makes it descending.
+		slices.SortStableFunc(items, func(x, y attributed) int {
+			return y.activity.When.Compare(x.activity.When)
+		})
+
+		// Wording last, once the order is settled. Nothing below this point can reorder
+		// anything: a finished line carries its date as text, and text does not compare.
+		texts := make([]string, 0, len(items))
+		for _, it := range items {
+			// A missing timestamp says so rather than inventing one. time.Time's zero value
+			// is a valid instant that formats as "1 January 0001", so without this check an
+			// unset date is a confident wrong answer rather than a visible gap. It also
+			// sorts to the bottom above, year 1 being older than everything.
+			dateText := it.activity.When.Format("2 January 2006")
+			if it.activity.When.IsZero() {
+				dateText = "date unknown"
+			}
+			texts = append(texts, it.mp.Name+": "+dateText+", "+it.activity.Text)
+		}
+
 		// Reading is not delivering: /latest deliberately does not MarkSent, so the poll
 		// loop still owes the user these items. Ratcheted in the /latest tests.
 		return reply(update.ChatID, strings.Join(texts, "\n")), nil

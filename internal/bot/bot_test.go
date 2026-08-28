@@ -612,6 +612,79 @@ func TestHandleUpdate_latest_undatedItem_saysDateUnknownAndSortsLast(t *testing.
 	}
 }
 
+// Slice C8c (Phase C): two MPs' items INTERLEAVE by recency. This is the slice the whole
+// C8 split was arranged around, and the one C8b was deliberately built to fail.
+//
+// C8b sorts each MP's items among themselves, INSIDE the per-MP loop. That satisfies every
+// test written so far and is still wrong for a command called /latest: with two MPs
+// followed, the reply is a run of one MP's items followed by a run of the other's, so an
+// item from three weeks ago can sit above one from this morning purely because of the order
+// the follows happen to be stored in. "Latest" has to mean latest across the whole reply.
+//
+// The fixture makes every cheap implementation produce a visibly different list. Each MP's
+// items arrive OLDEST-first, and the two MPs' dates interleave (5th, 4th, 2nd, 1st alternates
+// between them), so grouping and ordering are independent failures:
+//
+//	no sort at all         -> Cat 1 Feb, Cat 5 Feb, Ada 2 Feb, Ada 4 Feb
+//	C8b as it stands today -> Cat 5 Feb, Cat 1 Feb, Ada 4 Feb, Ada 2 Feb
+//	sorted OLDEST-first    -> Cat 1 Feb, Ada 2 Feb, Ada 4 Feb, Cat 5 Feb
+//	interleaved, newest    -> Cat 5 Feb, Ada 4 Feb, Ada 2 Feb, Cat 1 Feb   <- the only pass
+//
+// ⭐ Every line is checked for its MP's NAME as well as its item text, and that is not
+// belt-and-braces. Sorting across MPs means the sort can no longer live where `mp` and `a`
+// are both in scope, so whatever carries an item past that point has to carry its MP with
+// it. Attribution is therefore the thing most likely to break in this slice — an
+// implementation that gets the ORDER right while pairing items with the wrong MP would
+// otherwise pass, and would be a worse bug than the one being fixed.
+func TestHandleUpdate_latest_twoMPs_itemsInterleaveByRecency(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, bot.Member{ID: 101, Name: "Cat Smith"})
+	store.FollowMP(1, bot.Member{ID: 102, Name: "Ada Clark"})
+
+	day := func(d int) time.Time {
+		return time.Date(2026, time.February, d, 9, 0, 0, 0, time.UTC)
+	}
+
+	source := fakeSource{items: map[int][]bot.Activity{
+		101: {
+			{ID: "q3", Text: "asked about rail fares", When: day(1)},
+			{ID: "v9", Text: "voted on the finance bill", When: day(5)},
+		},
+		102: {
+			{ID: "w2", Text: "tabled a question on ferries", When: day(2)},
+			{ID: "s7", Text: "spoke on housing", When: day(4)},
+		},
+	}}
+
+	// nil resolver: /latest looks up no names, and the nil enforces that it never tries.
+	reply, err := bot.New(store, nil, source).HandleUpdate(bot.Update{ChatID: 1, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest returned error: %v", err)
+	}
+
+	want := []struct{ mp, item string }{
+		{"Cat Smith", "voted on the finance bill"},    // 5 Feb
+		{"Ada Clark", "spoke on housing"},             // 4 Feb
+		{"Ada Clark", "tabled a question on ferries"}, // 2 Feb
+		{"Cat Smith", "asked about rail fares"},       // 1 Feb
+	}
+
+	lines := strings.Split(reply.Text, "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("/latest replied %q, want %d lines, got %d", reply.Text, len(want), len(lines))
+	}
+
+	for i, w := range want {
+		if !strings.Contains(lines[i], w.item) {
+			t.Errorf("/latest line %d is %q, want the item %q (full reply %q)", i+1, lines[i], w.item, reply.Text)
+		}
+		if !strings.Contains(lines[i], w.mp) {
+			t.Errorf("/latest line %d is %q, want it attributed to %q — the item must keep its MP when the sort crosses MPs", i+1, lines[i], w.mp)
+		}
+	}
+}
+
 // Slice C5 (Phase C): activity is fetched by member ID, not by display name. Two sitting
 // MPs can share one display name — B3's live probing of the Members API found "Smith"
 // matching 11 sitting members, and matching is substring, so ambiguity cannot be filtered
