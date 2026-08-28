@@ -685,6 +685,202 @@ func TestHandleUpdate_latest_twoMPs_itemsInterleaveByRecency(t *testing.T) {
 	}
 }
 
+// Slice C8d (Phase C): /latest keeps only each MP's three most recent items.
+//
+// A per-MP cap rather than one cap over the whole reply, so that every followed MP is
+// represented: with a single overall limit, two busy MPs could fill the reply and someone
+// following twenty would never hear about most of them. The cost is that the reply still
+// grows with the follow count, which is a real weakness of this shape and is why the
+// message-length guard is only partial.
+//
+// ⭐ The fixture is built so that FOUR different wrong implementations each produce a
+// visibly different reply. Cat Smith has five items, arriving in scrambled date order;
+// Ada Clark has two, which is under the cap and so must survive untouched:
+//
+//	Cat, as fetched:  1 Feb, 9 Feb, 3 Feb, 7 Feb, 5 Feb
+//
+//	take the first 3 as fetched -> 1, 9, 3   (wrong: keeps the two oldest)
+//	take the last 3 as fetched  -> 3, 7, 5   (wrong: drops the newest)
+//	keep the OLDEST 3           -> 1, 3, 5   (wrong: exactly backwards)
+//	keep the NEWEST 3           -> 9, 7, 5   <- the only right answer
+//
+// Scrambling matters as much here as it did in C8b: had the items arrived newest-first,
+// "take the first three" would have passed while being the wrong rule entirely.
+//
+// ⭐ The two DROPPED items are asserted absent from the whole reply, not merely missing
+// from their expected positions. That is what distinguishes a cap from a reordering — an
+// implementation that merely sorted differently would leave them in the text somewhere.
+//
+// ⚠️ This test asserts the first five lines and a MINIMUM line count, deliberately not an
+// exact one. The next slice adds a notice saying items were withheld, which will append a
+// line; pinning the total here would mean rewriting this test to accommodate a behavior it
+// is not about. Order and membership are what this slice owns.
+func TestHandleUpdate_latest_keepsOnlyEachMPsThreeNewestItems(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, bot.Member{ID: 101, Name: "Cat Smith"})
+	store.FollowMP(1, bot.Member{ID: 102, Name: "Ada Clark"})
+
+	day := func(d int) time.Time {
+		return time.Date(2026, time.February, d, 9, 0, 0, 0, time.UTC)
+	}
+
+	source := fakeSource{items: map[int][]bot.Activity{
+		// Five items, out of order, so the newest three are neither the first three
+		// nor the last three as they arrive.
+		101: {
+			{ID: "c1", Text: "asked about rail fares", When: day(1)},
+			{ID: "c2", Text: "voted on the finance bill", When: day(9)},
+			{ID: "c3", Text: "spoke on housing", When: day(3)},
+			{ID: "c4", Text: "tabled a question on ferries", When: day(7)},
+			{ID: "c5", Text: "met the transport minister", When: day(5)},
+		},
+		// Two items — under the cap, so both must survive.
+		102: {
+			{ID: "a1", Text: "opposed the housing bill", When: day(8)},
+			{ID: "a2", Text: "asked about school funding", When: day(2)},
+		},
+	}}
+
+	// nil resolver: /latest looks up no names, and the nil enforces that it never tries.
+	reply, err := bot.New(store, nil, source).HandleUpdate(bot.Update{ChatID: 1, Text: "/latest"})
+	if err != nil {
+		t.Fatalf("/latest returned error: %v", err)
+	}
+
+	// Cat's newest three and both of Ada's, still interleaved by recency across the two.
+	want := []struct{ mp, item string }{
+		{"Cat Smith", "voted on the finance bill"},    // 9 Feb
+		{"Ada Clark", "opposed the housing bill"},     // 8 Feb
+		{"Cat Smith", "tabled a question on ferries"}, // 7 Feb
+		{"Cat Smith", "met the transport minister"},   // 5 Feb
+		{"Ada Clark", "asked about school funding"},   // 2 Feb
+	}
+
+	lines := strings.Split(reply.Text, "\n")
+	if len(lines) < len(want) {
+		t.Fatalf("/latest replied %q, want at least %d lines, got %d", reply.Text, len(want), len(lines))
+	}
+
+	for i, w := range want {
+		if !strings.Contains(lines[i], w.item) {
+			t.Errorf("/latest line %d is %q, want the item %q (full reply %q)", i+1, lines[i], w.item, reply.Text)
+		}
+		if !strings.Contains(lines[i], w.mp) {
+			t.Errorf("/latest line %d is %q, want it attributed to %q", i+1, lines[i], w.mp)
+		}
+	}
+
+	// Cat's two oldest are over the cap and must be gone entirely, not merely demoted.
+	for _, dropped := range []string{"spoke on housing", "asked about rail fares"} {
+		if strings.Contains(reply.Text, dropped) {
+			t.Errorf("/latest replied %q, want %q dropped — it is Cat Smith's 4th or 5th newest item", reply.Text, dropped)
+		}
+	}
+}
+
+// Slice C8d, second half: the reply says so when items were withheld.
+//
+// Without this, three items from an MP are indistinguishable from that MP having had a
+// quiet fortnight. The cap is invisible to the person reading, which is the same objection
+// C8b raised against rendering an unset date as "1 January 0001": a silent gap reads as a
+// complete answer. The sentence chosen is "Showing each MP's 3 most recent items."
+//
+// ⭐ THREE cases, because the interesting behavior is when the notice is ABSENT. A test
+// with only the over-cap case would pass an implementation that appends the sentence to
+// every reply — including one listing a single item, where it would be simply false.
+//
+// ⭐ The middle case is the boundary and is the point of the table. An MP with EXACTLY
+// three items has had nothing withheld, so there must be no notice. That is what separates
+// `> maxItemsPerMP` from `>= maxItemsPerMP`, an off-by-one that no other case here catches
+// and that would otherwise ship a reply claiming to have hidden something it did not.
+//
+// ⭐ The assertions match FRAGMENTS — "each MP" and "3 most recent" — rather than the whole
+// sentence. Both halves of the meaning are pinned (per-MP, and the newest three) while
+// punctuation and phrasing stay free, exactly as C8a pinned "3 Feb" rather than a layout.
+// Checking the LAST line, not the whole reply, keeps the notice out of the item list; a
+// blank spacer line before it would not break this.
+func TestHandleUpdate_latest_saysWhenItemsWereWithheld(t *testing.T) {
+	day := func(d int) time.Time {
+		return time.Date(2026, time.February, d, 9, 0, 0, 0, time.UTC)
+	}
+
+	tests := []struct {
+		name       string
+		items      map[int][]bot.Activity
+		wantNotice bool
+	}{
+		{
+			name: "an MP has more than three items",
+			items: map[int][]bot.Activity{
+				101: {
+					{ID: "c1", Text: "asked about rail fares", When: day(1)},
+					{ID: "c2", Text: "voted on the finance bill", When: day(9)},
+					{ID: "c3", Text: "spoke on housing", When: day(3)},
+					{ID: "c4", Text: "tabled a question on ferries", When: day(7)},
+				},
+				102: {{ID: "a1", Text: "opposed the housing bill", When: day(8)}},
+			},
+			wantNotice: true,
+		},
+		{
+			// The boundary: three is not "more than three". Nothing was withheld.
+			name: "an MP has exactly three items",
+			items: map[int][]bot.Activity{
+				101: {
+					{ID: "c1", Text: "asked about rail fares", When: day(1)},
+					{ID: "c2", Text: "voted on the finance bill", When: day(9)},
+					{ID: "c3", Text: "spoke on housing", When: day(3)},
+				},
+				102: {{ID: "a1", Text: "opposed the housing bill", When: day(8)}},
+			},
+			wantNotice: false,
+		},
+		{
+			name: "every MP has fewer than three items",
+			items: map[int][]bot.Activity{
+				101: {{ID: "c2", Text: "voted on the finance bill", When: day(9)}},
+				102: {{ID: "a1", Text: "opposed the housing bill", When: day(8)}},
+			},
+			wantNotice: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := bot.NewMemoryStore()
+			store.AddChat(1)
+			store.FollowMP(1, bot.Member{ID: 101, Name: "Cat Smith"})
+			store.FollowMP(1, bot.Member{ID: 102, Name: "Ada Clark"})
+
+			// nil resolver: /latest looks up no names, and the nil enforces it never tries.
+			reply, err := bot.New(store, nil, fakeSource{items: tt.items}).
+				HandleUpdate(bot.Update{ChatID: 1, Text: "/latest"})
+			if err != nil {
+				t.Fatalf("/latest returned error: %v", err)
+			}
+
+			lines := strings.Split(reply.Text, "\n")
+			last := lines[len(lines)-1]
+
+			if tt.wantNotice {
+				if !strings.Contains(last, "each MP") || !strings.Contains(last, "3 most recent") {
+					t.Errorf("/latest replied %q, want the last line to say each MP's 3 most recent items are shown", reply.Text)
+				}
+				// The notice is an addition, not a replacement: the newest item still leads.
+				if !strings.Contains(lines[0], "voted on the finance bill") {
+					t.Errorf("/latest line 1 is %q, want the newest item still first", lines[0])
+				}
+				return
+			}
+
+			if strings.Contains(reply.Text, "each MP") || strings.Contains(reply.Text, "3 most recent") {
+				t.Errorf("/latest replied %q, want no withholding notice — nothing was withheld", reply.Text)
+			}
+		})
+	}
+}
+
 // Slice C5 (Phase C): activity is fetched by member ID, not by display name. Two sitting
 // MPs can share one display name — B3's live probing of the Members API found "Smith"
 // matching 11 sitting members, and matching is substring, so ambiguity cannot be filtered

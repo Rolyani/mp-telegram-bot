@@ -2,6 +2,7 @@ package bot
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -374,80 +375,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		// lookup: /list stays offline, and cannot fail because the Members API is down.
 		return reply(update.ChatID, "You follow: "+strings.Join(memberNames(follows), ", ")), nil
 	case "/latest":
-		// Fetched live rather than read from the store: unlike /list, this command cannot
-		// answer offline, because the whole point of it is what Parliament says right now.
-		follows := b.store.Follows(update.ChatID)
-		if len(follows) == 0 {
-			return reply(update.ChatID, "You are not following any MPs yet."), nil
-		}
-
-		// One item, and whose it is.
-		//
-		// This type exists because /latest has to order items ACROSS MPs, and the fetch is
-		// necessarily per MP. Sorting each MP's items separately can only ever order them
-		// within their own group, so an item from weeks ago would still print above one from
-		// this morning whenever it belonged to an earlier follow. Interleaving needs every
-		// item in ONE list, and a bare Activity in that list could no longer say who it
-		// belonged to — the source is asked by member ID and never sees a name.
-		//
-		// Holding the Activity itself rather than a finished line is the point. A rendered
-		// string carries its date as prose, which cannot be compared; Activity carries a
-		// time.Time, which can. Attribution and rendering therefore happen AFTER the sort,
-		// and this type is what survives the journey.
-		//
-		// Declared here rather than beside Activity because nothing outside this command has
-		// any use for it.
-		type attributed struct {
-			mp       Member
-			activity Activity
-		}
-
-		// Flatten first: every followed MP's items into a single list, each still carrying
-		// its MP. This loop is the only place where both halves are in scope at once, which
-		// is why the pairing has to happen here even though the wording happens later.
-		var items []attributed
-		for _, mp := range follows {
-			for _, a := range b.source.Activity(mp.ID) {
-				items = append(items, attributed{mp: mp, activity: a})
-			}
-		}
-
-		if len(items) == 0 {
-			return reply(update.ChatID, "Your followed MPs have not made any contributions yet."), nil
-		}
-
-		// One sort over everything, newest first — this is what makes /latest mean latest
-		// rather than "latest, per MP, in follow order".
-		//
-		// STABLE, because ties are the ordinary case rather than the edge: two MPs speaking
-		// on the same sitting day is likelier than one MP doing so twice, and Parliament's
-		// timestamps need not separate them at all. A stable sort settles a tie in follow
-		// order, which is at least a reason; an unstable one would settle it arbitrarily and
-		// differently as the number of items changed.
-		//
-		// Comparing y to x, rather than x to y, is the whole of what makes it descending.
-		slices.SortStableFunc(items, func(x, y attributed) int {
-			return y.activity.When.Compare(x.activity.When)
-		})
-
-		// Wording last, once the order is settled. Nothing below this point can reorder
-		// anything: a finished line carries its date as text, and text does not compare.
-		texts := make([]string, 0, len(items))
-		for _, it := range items {
-			// A missing timestamp says so rather than inventing one. time.Time's zero value
-			// is a valid instant that formats as "1 January 0001", so without this check an
-			// unset date is a confident wrong answer rather than a visible gap. It also
-			// sorts to the bottom above, year 1 being older than everything.
-			dateText := it.activity.When.Format("2 January 2006")
-			if it.activity.When.IsZero() {
-				dateText = "date unknown"
-			}
-			texts = append(texts, it.mp.Name+": "+dateText+", "+it.activity.Text)
-		}
-
-		// Reading is not delivering: /latest deliberately does not MarkSent, so the poll
-		// loop still owes the user these items. Ratcheted in the /latest tests.
-		return reply(update.ChatID, strings.Join(texts, "\n")), nil
+		return b.latest(update.ChatID), nil
 	case "/help":
 		return reply(update.ChatID,
 			"Follow MPs by typing their name or the post code into /follow.\n"+
@@ -465,4 +393,144 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	default:
 		return reply(update.ChatID, "Use /start to begin."), nil
 	}
+}
+
+// latest builds the reply to /latest: every followed MP's recent activity, dated, ordered
+// newest-first across all of them, and capped per MP.
+//
+// It lives outside HandleUpdate because it had grown to over half that function on its own,
+// while every other command answers in a handful of lines. The switch is meant to read as a
+// table of commands; one arm long enough to need scrolling stops it doing that. Same move as
+// CheckActivity becoming a method, and for the same reason — the dependencies it needs are
+// already fields on Bot, so nothing has to be threaded through as arguments.
+//
+// It returns no error. Every path here answers in words, including both empty cases, and an
+// error that is always nil is a promise the signature cannot keep. Whoever gives the activity
+// source a failure mode is the one who should change that, with a test that forces it.
+func (b *Bot) latest(chatID int64) Reply {
+	// Fetched live rather than read from the store: unlike /list, this command cannot
+	// answer offline, because the whole point of it is what Parliament says right now.
+	follows := b.store.Follows(chatID)
+	if len(follows) == 0 {
+		return reply(chatID, "You are not following any MPs yet.")
+	}
+
+	// One item, and whose it is.
+	//
+	// This type exists because /latest has to order items ACROSS MPs, and the fetch is
+	// necessarily per MP. Sorting each MP's items separately can only ever order them
+	// within their own group, so an item from weeks ago would still print above one from
+	// this morning whenever it belonged to an earlier follow. Interleaving needs every
+	// item in ONE list, and a bare Activity in that list could no longer say who it
+	// belonged to — the source is asked by member ID and never sees a name.
+	//
+	// Holding the Activity itself rather than a finished line is the point. A rendered
+	// string carries its date as prose, which cannot be compared; Activity carries a
+	// time.Time, which can. Attribution and rendering therefore happen AFTER the sort,
+	// and this type is what survives the journey.
+	//
+	// Declared here rather than beside Activity because nothing outside this command has
+	// any use for it.
+	type attributed struct {
+		mp       Member
+		activity Activity
+	}
+
+	// Flatten first: every followed MP's items into a single list, each still carrying
+	// its MP. This loop is the only place where both halves are in scope at once, which
+	// is why the pairing has to happen here even though the wording happens later.
+	var items []attributed
+	for _, mp := range follows {
+		for _, a := range b.source.Activity(mp.ID) {
+			items = append(items, attributed{mp: mp, activity: a})
+		}
+	}
+
+	if len(items) == 0 {
+		return reply(chatID, "Your followed MPs have not made any contributions yet.")
+	}
+
+	// One sort over everything, newest first — this is what makes /latest mean latest
+	// rather than "latest, per MP, in follow order".
+	//
+	// STABLE, because ties are the ordinary case rather than the edge: two MPs speaking
+	// on the same sitting day is likelier than one MP doing so twice, and Parliament's
+	// timestamps need not separate them at all. A stable sort settles a tie in follow
+	// order, which is at least a reason; an unstable one would settle it arbitrarily and
+	// differently as the number of items changed.
+	//
+	// Comparing y to x, rather than x to y, is the whole of what makes it descending.
+	slices.SortStableFunc(items, func(x, y attributed) int {
+		return y.activity.When.Compare(x.activity.When)
+	})
+
+	// Cap: at most three items per MP, keeping each MP's newest.
+	//
+	// Per MP rather than one limit over the whole reply, so that everybody followed is
+	// represented — a single overall cap would let two busy MPs crowd out the rest, and
+	// somebody following twenty would never hear about most of them. The cost is that
+	// the reply still grows with the follow count, so this only partly guards Telegram's
+	// message-length limit; a hard ceiling is a separate concern for whoever adds it.
+	//
+	// This walks the ALREADY SORTED list, which is what makes a second sort unnecessary:
+	// a list in descending date order is also descending within each MP, so the first
+	// three of an MP's items encountered here ARE that MP's three newest.
+	//
+	// The counter is keyed by member ID, never by name. Two sitting MPs can share a
+	// display name — the reason follows have been stored by ID since C0 — and a counter
+	// keyed by name would cap two different people jointly.
+	//
+	// A map's zero value does the setup: an ID never seen before reads as 0, so there is
+	// nothing to initialise per MP. Note the map literal rather than `var kept map[int]int`;
+	// a nil map reads fine but PANICS on write, which slices do not do.
+	const maxItemsPerMP = 3
+	kept := map[int]int{}
+	capped := make([]attributed, 0, len(items))
+	for _, it := range items {
+		if kept[it.mp.ID] == maxItemsPerMP {
+			continue
+		}
+		kept[it.mp.ID]++
+		capped = append(capped, it)
+	}
+
+	// Wording last, once the order is settled. Nothing below this point can reorder
+	// anything: a finished line carries its date as text, and text does not compare.
+	texts := make([]string, 0, len(capped))
+	for _, it := range capped {
+		// A missing timestamp says so rather than inventing one. time.Time's zero value
+		// is a valid instant that formats as "1 January 0001", so without this check an
+		// unset date is a confident wrong answer rather than a visible gap. It also
+		// sorts to the bottom above, year 1 being older than everything.
+		dateText := it.activity.When.Format("2 January 2006")
+		if it.activity.When.IsZero() {
+			dateText = "date unknown"
+		}
+		texts = append(texts, it.mp.Name+": "+dateText+", "+it.activity.Text)
+	}
+
+	// Say so when the cap hid something. Three items from an MP would otherwise be
+	// indistinguishable from that MP having had a quiet fortnight — the reader cannot
+	// see a limit they were never told about, and a silent gap reads as a complete
+	// answer. Same objection as rendering an unset date: make the absence visible.
+	//
+	// Only when something actually WAS withheld. An MP with exactly three items has had
+	// nothing hidden, and a notice there would be a false statement about our own reply.
+	// Comparing the two lengths is the whole test: capped is shorter than items exactly
+	// when at least one MP ran over.
+	//
+	// The number comes from the constant rather than being written into the sentence, so
+	// that changing the cap cannot leave the wording quietly lying about it — a comment
+	// or message that was true when written is the failure mode this file has already
+	// hit more than once.
+	//
+	// The empty string is a blank line: in a chat client the notice reads as a footnote
+	// about the list rather than another entry in it.
+	if len(capped) < len(items) {
+		texts = append(texts, "", "Showing each MP's "+strconv.Itoa(maxItemsPerMP)+" most recent items.")
+	}
+
+	// Reading is not delivering: /latest deliberately does not MarkSent, so the poll
+	// loop still owes the user these items. Ratcheted in the /latest tests.
+	return reply(chatID, strings.Join(texts, "\n"))
 }
