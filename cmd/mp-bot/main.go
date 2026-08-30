@@ -28,12 +28,12 @@ func main() {
 // run reads one message per line from in and writes each reply to out, stopping at end of
 // input or at the first failure.
 func run(in io.Reader, out io.Writer) error {
-	// Neither collaborator is wired yet. That is a statement about how far this entrypoint
-	// has got, not an oversight: /help and the other offline commands reach neither, so a
-	// nil pair is honest about what this program can currently do, and anything that does
-	// need the Members API will panic loudly rather than quietly appear to work. The next
-	// slice replaces the first nil with a real *Resolver.
-	b := bot.New(bot.NewMemoryStore(), nil, nil)
+	// The resolver is real: /find and /follow hit the live Members API from here. The
+	// activity source is still nil, which is a statement about how far this entrypoint has
+	// got rather than an oversight — but note it is no longer harmless. /latest calls
+	// through it the moment a chat follows anybody, so following an MP and asking for
+	// /latest panics until E0b's second half lands.
+	b := bot.New(bot.NewMemoryStore(), bot.NewResolver("https://members-api.parliament.uk"), bot.NewVotesSource("https://commonsvotes-api.parliament.uk"))
 
 	scanner := bufio.NewScanner(in)
 	for scanner.Scan() {
