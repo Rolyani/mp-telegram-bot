@@ -2148,3 +2148,67 @@ func TestHandleUpdate_unfollow_severalFollowsMatch_removesNoneAndOffersChoices(t
 		})
 	}
 }
+
+// Slice E0b (second half — the first REAL ActivitySource): given the Commons Votes API's
+// member-voting JSON for a member ID, VotesSource returns that MP's divisions as Activity.
+//
+// ⭐ THIS IS THE SLICE THAT TESTS AN ASSUMPTION FOUR EARLIER SLICES WERE BUILT ON. C8a–C8d
+// sort, date and cap /latest on the belief that Parliament supplies a timestamp; until now
+// every one of them was proven against fakeSource, so a source that supplied no date would
+// have left the whole suite green and /latest saying "date unknown" forever. Probing the
+// live API settled it — the date is real — and asserting When here is what stops that
+// answer quietly regressing.
+//
+// ⚠️ The date arrives as "2026-07-14T17:57:00": NO timezone offset, so it is NOT RFC3339,
+// and time.Parse(time.RFC3339, …) fails on it — returning the ZERO time alongside its
+// error. Ignore that error and every item renders as "date unknown" while the parse
+// "works". The layout that reads this format is "2006-01-02T15:04:05".
+//
+// ⚠️ Note the shape differs from the Members API: this endpoint returns a BARE JSON ARRAY
+// (not {"items": […]}) and its fields are PascalCase. resolver.go is a pattern to copy,
+// not code to reuse. Same seam decision though — an injectable base URL pointed at an
+// httptest.Server, so a wrong URL or query cannot pass.
+func TestVotesSource_Activity_returnsTheMPsVotesAsActivity(t *testing.T) {
+	// Fake Commons Votes API: capture the member ID we asked for, then return one real
+	// division, trimmed to the fields the bot reads.
+	var gotMemberID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMemberID = r.URL.Query().Get("queryParameters.memberId")
+		fmt.Fprint(w, `[{"MemberId":4514,"MemberVotedAye":false,"MemberVotedNo":true,
+			"PublishedDivision":{"DivisionId":2409,"Date":"2026-07-14T17:57:00",
+			"Title":"Public Office (Accountability) Bill Report Stage: Amendment 19"}}]`)
+	}))
+	defer srv.Close()
+
+	source := bot.NewVotesSource(srv.URL)
+	items := source.Activity(4514)
+
+	// Asked about the MP we passed in — proves the request is built from the argument
+	// rather than a constant, which is the whole reason for httptest over a faked client.
+	if gotMemberID != "4514" {
+		t.Errorf("source queried memberId=%q, want %q", gotMemberID, "4514")
+	}
+
+	if len(items) != 1 {
+		t.Fatalf("Activity returned %d items, want 1: %v", len(items), items)
+	}
+	got := items[0]
+
+	// The division ID is what makes an item de-duplicable, so it must survive as the
+	// Activity ID — the poll loop's `seen` set is keyed on it.
+	if got.ID != "2409" {
+		t.Errorf("Activity ID = %q, want %q (the DivisionId)", got.ID, "2409")
+	}
+
+	// How they voted, then what it was.
+	wantText := "Voted No on: Public Office (Accountability) Bill Report Stage: Amendment 19"
+	if got.Text != wantText {
+		t.Errorf("Activity Text = %q, want %q", got.Text, wantText)
+	}
+
+	// The assumption itself, asserted rather than assumed.
+	wantWhen := time.Date(2026, time.July, 14, 17, 57, 0, 0, time.UTC)
+	if !got.When.Equal(wantWhen) {
+		t.Errorf("Activity When = %v, want %v — a zero time here means the date was never parsed, and /latest would render every item as \"date unknown\"", got.When, wantWhen)
+	}
+}
