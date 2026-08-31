@@ -2314,3 +2314,71 @@ func TestTelegram_SendMessage_blockedByUser_returnsError(t *testing.T) {
 		t.Errorf("SendMessage error = %q, want it to mention the 403 status", err)
 	}
 }
+
+// Slice E3: the bot can hear. SendMessage gave it a voice; this is the other half.
+//
+// getUpdates is where Telegram's wire shape stops resembling ours. Everything the bot works
+// in is a flat bot.Update{ChatID, Text}; what arrives is four levels deep, wrapped in an
+// envelope, and carries a dozen fields nobody here wants. So this slice is a RESHAPE, and
+// the reshape is the whole of it — the HTTP call is the same one SendMessage already makes.
+//
+// The payload below is real, trimmed only of fields that make it longer without making it
+// harder. Note what is deliberately left in: message_id, from, is_bot, date. Nothing reads
+// them, and they must cost nothing — encoding/json silently ignores any field the target
+// struct does not declare, which is what lets a small struct read a large document. That is
+// worth seeing proved rather than assumed, because the opposite (a decoder that errors on
+// unknown fields) is the default in plenty of other languages.
+//
+// ⚠️ TWO updates, not one, and that is not padding. A slice of one can be returned by an
+// implementation that never loops — reads Result[0] and stops — and such an implementation
+// would pass a one-item test and then drop every message but the first in production. The
+// second item is what makes the loop non-optional.
+//
+// They come from DIFFERENT chats on purpose too: each Update must carry its own chat's ID,
+// not the first one's. Getting that wrong sends Ian's reply to a stranger.
+func TestTelegram_GetUpdates_parsesTelegramsPayloadIntoUpdates(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `{"ok":true,"result":[
+			{"update_id":870123456,"message":{"message_id":12,
+				"from":{"id":4242,"is_bot":false,"first_name":"Ian"},
+				"chat":{"id":4242,"first_name":"Ian","type":"private"},
+				"date":1756600000,"text":"/help"}},
+			{"update_id":870123457,"message":{"message_id":13,
+				"from":{"id":99,"is_bot":false,"first_name":"Someone"},
+				"chat":{"id":99,"first_name":"Someone","type":"private"},
+				"date":1756600060,"text":"/follow Keir Starmer"}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	updates, err := tg.GetUpdates()
+	if err != nil {
+		t.Fatalf("GetUpdates returned error: %v", err)
+	}
+
+	if gotPath != "/botTESTTOKEN/getUpdates" {
+		t.Errorf("GetUpdates called %q, want %q", gotPath, "/botTESTTOKEN/getUpdates")
+	}
+
+	// Fatal, not Error: every assertion below indexes into this slice.
+	want := []bot.Update{
+		{ChatID: 4242, Text: "/help"},
+		{ChatID: 99, Text: "/follow Keir Starmer"},
+	}
+	if len(updates) != len(want) {
+		t.Fatalf("GetUpdates returned %d updates, want %d: %+v", len(updates), len(want), updates)
+	}
+
+	// Compared whole rather than field by field. bot.Update is two comparable fields, so ==
+	// works, and comparing the whole value means a third field added later is checked here
+	// for free instead of being quietly ignored by an assertion that names two.
+	for i, w := range want {
+		if updates[i] != w {
+			t.Errorf("updates[%d] = %+v, want %+v", i, updates[i], w)
+		}
+	}
+}

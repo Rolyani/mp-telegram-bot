@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -95,4 +96,65 @@ func (t *Telegram) SendMessage(chatID int64, text string) error {
 	}
 
 	return nil
+}
+
+// GetUpdates fetches the messages waiting for the bot and returns them in the flat shape the
+// rest of the package works in.
+//
+// This is where Telegram's vocabulary stops. What arrives is an envelope containing a list
+// of updates, each wrapping a message, each holding a chat — four levels for two values.
+// Everything downstream of here sees only Update{ChatID, Text}, which is why the nested
+// structs below are declared inside this function: they describe a wire format, not a domain
+// concept, and nothing else has any business knowing that "chat" and "message" are separate
+// things to Telegram.
+//
+// ⚠️ It has no offset yet, so every call returns the SAME messages from the start of the
+// queue — Telegram only drops an update once it has been acknowledged by a later call
+// passing offset = update_id + 1. Poll in a loop as it stands and the bot answers every
+// message forever. That is the next slice, and it is why update_id is not read here.
+//
+// An empty queue is not an error: it is the normal outcome of most calls, and comes back as
+// a nil slice with a nil error.
+func (t *Telegram) GetUpdates() ([]Update, error) {
+	endpoint := t.baseURL + "/bot" + t.token + "/getUpdates"
+
+	resp, err := t.client.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("telegram API returned %s", resp.Status)
+	}
+
+	// Only the fields that are actually read are declared. encoding/json ignores the rest —
+	// update_id, from, date, message_id and the dozen others Telegram sends — so the struct
+	// stays the size of what the bot needs rather than the size of the document.
+	var payload struct {
+		Result []struct {
+			Message struct {
+				Chat struct {
+					ID int64
+				}
+				Text string
+			}
+		}
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("get updates: %w", err)
+	}
+
+	// Reach through the nesting for the two values that matter and drop the container.
+	var updates []Update
+	for _, result := range payload.Result {
+		updates = append(updates, Update{
+			ChatID: result.Message.Chat.ID,
+			Text:   result.Message.Text,
+		})
+	}
+
+	return updates, nil
 }
