@@ -2212,3 +2212,65 @@ func TestVotesSource_Activity_returnsTheMPsVotesAsActivity(t *testing.T) {
 		t.Errorf("Activity When = %v, want %v — a zero time here means the date was never parsed, and /latest would render every item as \"date unknown\"", got.When, wantWhen)
 	}
 }
+
+// --- Phase E: real Telegram I/O ---------------------------------------------------------
+
+// Slice E1: the bot can say something out loud.
+//
+// Everything up to now has RETURNED a Reply and left it to a caller to render — stdout, in
+// E0a's case. This is the first code that puts a sentence in front of a human who is not
+// sitting at the terminal that started the process.
+//
+// The seam is the one resolver.go and votes.go already use: an injectable base URL pointed
+// at an httptest.Server, so the request itself is asserted rather than assumed. It earns
+// more here than it did there, because Telegram's URL shape is easy to get subtly wrong and
+// a live API answers a wrong one with a bare 404 and no hint.
+//
+// ⚠️ Telegram carries the bot token IN THE PATH — not a header, not a query parameter:
+//
+//	https://api.telegram.org/bot<token>/sendMessage
+//
+// And note there is no separator: the literal "bot" is glued straight onto the token, so the
+// path is "/botTESTTOKEN/sendMessage" and NOT "/bot/TESTTOKEN/sendMessage".
+//
+// The token is its own constructor argument rather than something the caller pastes into the
+// base URL, so the one secret in this program has exactly one place it lives — and cannot end
+// up in a log line that only meant to print an endpoint.
+//
+// ⚠️ This asserts VALUES, not the HTTP method. r.FormValue reads a POST's form body and a
+// GET's query string alike, and Telegram accepts either, so the test passes whichever you
+// reach for — client.PostForm or the client.Get + url.Values shape votes.go already uses.
+func TestTelegram_SendMessage_sendsTheChatIDAndTextToTheAPI(t *testing.T) {
+	// Fake Telegram: capture what was asked of it, then answer the way the real one does.
+	var gotPath, gotChatID, gotText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotChatID = r.FormValue("chat_id")
+		gotText = r.FormValue("text")
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	wantText := "Voted No on: Public Office (Accountability) Bill"
+	if err := tg.SendMessage(4242, wantText); err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+
+	// The endpoint, token glued on and all.
+	if gotPath != "/botTESTTOKEN/sendMessage" {
+		t.Errorf("SendMessage called %q, want %q", gotPath, "/botTESTTOKEN/sendMessage")
+	}
+
+	// chat_id decides WHO reads this. A reply built for one chat and delivered to another is
+	// the worst bug this file can have, so it is asserted from the argument rather than
+	// trusted — the same reason votes.go's test checks the member ID it queried.
+	if gotChatID != "4242" {
+		t.Errorf("SendMessage sent chat_id=%q, want %q", gotChatID, "4242")
+	}
+
+	if gotText != wantText {
+		t.Errorf("SendMessage sent text=%q, want %q", gotText, wantText)
+	}
+}
