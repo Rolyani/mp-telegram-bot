@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -44,19 +45,27 @@ func NewTelegram(baseURL, token string) *Telegram {
 	}
 }
 
-// SendMessage delivers text to the chat with the given ID.
+// SendMessage delivers text to the chat with the given ID, returning an error if Telegram
+// did not accept it — either because the request could not be MADE (refused connection, DNS
+// failure, timeout) or because Telegram answered with anything other than 200.
 //
-// ⚠️ It reports an error only if the request could not be MADE — a refused connection, a
-// DNS failure, a timeout. Any response Telegram actually sends is treated as success,
-// including the ones that mean the message was not delivered:
+// ⚠️ Those are two separate checks, and the second is not optional. Go's http.Client
+// returns a non-nil error only for the first kind: a response that ARRIVES is a success as
+// far as PostForm is concerned, whatever its status line says. A 403 sails straight past
+// `if err != nil` with err still nil. Hence the explicit StatusCode comparison below —
+// which reads like belt and braces and is not.
 //
-//	400 Bad Request — malformed request, or a chat that does not exist
-//	403 Forbidden   — the user has blocked the bot, or deleted the chat
-//	429 Too Many Requests — rate limited; the reply is simply lost
+// ⚠️ What it does NOT do is tell the failures apart, and they are not alike:
 //
-// So a message can vanish silently and this returns nil. That is the next slice, and 403
-// is the one with real consequences: it means the chat should be PRUNED rather than
-// retried forever, which is a compliance matter as much as a hygiene one.
+//	400 Bad Request       — malformed request, or a chat that does not exist
+//	401 Unauthorized      — the token is wrong or has been revoked
+//	403 Forbidden         — the user has BLOCKED the bot, or deleted the chat
+//	429 Too Many Requests — rate limited; worth retrying, unlike the rest
+//
+// A caller gets one undifferentiated error and can only give up. 403 is the one that needs
+// telling apart: it means this chat will never accept another message, so it should be
+// PRUNED rather than retried forever — a compliance matter (docs/COMPLIANCE.md) as much as
+// a hygiene one. That needs a sentinel error and errors.Is, and it is its own slice.
 //
 // ⚠️ Telegram caps a message at 4096 characters and rejects longer ones with a 400. Nothing
 // here splits or truncates, and the /latest reply is already capable of exceeding it for a
@@ -80,6 +89,10 @@ func (t *Telegram) SendMessage(chatID int64, text string) error {
 	}
 
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("telegram API returned %s", resp.Status)
+	}
 
 	return nil
 }

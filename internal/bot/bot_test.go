@@ -2274,3 +2274,43 @@ func TestTelegram_SendMessage_sendsTheChatIDAndTextToTheAPI(t *testing.T) {
 		t.Errorf("SendMessage sent text=%q, want %q", gotText, wantText)
 	}
 }
+
+// Slice E2: a message Telegram REFUSED is not a message sent.
+//
+// ⚠️ This slice exists for one specific trap. Go's http.Client returns an error only when
+// the request could not be MADE — connection refused, DNS failure, timeout. A response that
+// arrives is a success as far as PostForm is concerned, whatever its status code says. So a
+// 403 sails straight through the `if err != nil` check that is already there, and
+// SendMessage returns nil having delivered precisely nothing.
+//
+// That is not how HTTP libraries in every language behave, and it is not what the code
+// reads like. It is why this test looks almost redundant and is not.
+//
+// 403 is the status under test rather than a generic 500 because it is the one with
+// consequences: Telegram answers 403 when the user has BLOCKED the bot or deleted the chat.
+// That chat will never accept another message, so retrying forever is pure waste — and
+// holding someone's data after they have unmistakably opted out is a compliance question
+// too (docs/COMPLIANCE.md). Pruning the chat is a later slice. Noticing at all is this one.
+func TestTelegram_SendMessage_blockedByUser_returnsError(t *testing.T) {
+	// A user who has blocked the bot. Telegram answers 403, and says why in the body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	err := tg.SendMessage(4242, "hello")
+	if err == nil {
+		t.Fatalf("SendMessage returned a nil error, want one — a 403 means the message was NOT delivered")
+	}
+
+	// The status belongs in the message. Whoever reads this in a log needs to tell a blocked
+	// user (403) from a bad token (401), from rate limiting (429) — three different problems
+	// with three different responses, and an error saying only "send failed" tells them none
+	// of it.
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("SendMessage error = %q, want it to mention the 403 status", err)
+	}
+}
