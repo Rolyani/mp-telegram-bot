@@ -2212,3 +2212,252 @@ func TestVotesSource_Activity_returnsTheMPsVotesAsActivity(t *testing.T) {
 		t.Errorf("Activity When = %v, want %v — a zero time here means the date was never parsed, and /latest would render every item as \"date unknown\"", got.When, wantWhen)
 	}
 }
+
+// --- Phase E: real Telegram I/O ---------------------------------------------------------
+
+// Slice E1: the bot can say something out loud.
+//
+// Everything up to now has RETURNED a Reply and left it to a caller to render — stdout, in
+// E0a's case. This is the first code that puts a sentence in front of a human who is not
+// sitting at the terminal that started the process.
+//
+// The seam is the one resolver.go and votes.go already use: an injectable base URL pointed
+// at an httptest.Server, so the request itself is asserted rather than assumed. It earns
+// more here than it did there, because Telegram's URL shape is easy to get subtly wrong and
+// a live API answers a wrong one with a bare 404 and no hint.
+//
+// ⚠️ Telegram carries the bot token IN THE PATH — not a header, not a query parameter:
+//
+//	https://api.telegram.org/bot<token>/sendMessage
+//
+// And note there is no separator: the literal "bot" is glued straight onto the token, so the
+// path is "/botTESTTOKEN/sendMessage" and NOT "/bot/TESTTOKEN/sendMessage".
+//
+// The token is its own constructor argument rather than something the caller pastes into the
+// base URL, so the one secret in this program has exactly one place it lives — and cannot end
+// up in a log line that only meant to print an endpoint.
+//
+// ⚠️ This asserts VALUES, not the HTTP method. r.FormValue reads a POST's form body and a
+// GET's query string alike, and Telegram accepts either, so the test passes whichever you
+// reach for — client.PostForm or the client.Get + url.Values shape votes.go already uses.
+func TestTelegram_SendMessage_sendsTheChatIDAndTextToTheAPI(t *testing.T) {
+	// Fake Telegram: capture what was asked of it, then answer the way the real one does.
+	var gotPath, gotChatID, gotText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotChatID = r.FormValue("chat_id")
+		gotText = r.FormValue("text")
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	wantText := "Voted No on: Public Office (Accountability) Bill"
+	if err := tg.SendMessage(4242, wantText); err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+
+	// The endpoint, token glued on and all.
+	if gotPath != "/botTESTTOKEN/sendMessage" {
+		t.Errorf("SendMessage called %q, want %q", gotPath, "/botTESTTOKEN/sendMessage")
+	}
+
+	// chat_id decides WHO reads this. A reply built for one chat and delivered to another is
+	// the worst bug this file can have, so it is asserted from the argument rather than
+	// trusted — the same reason votes.go's test checks the member ID it queried.
+	if gotChatID != "4242" {
+		t.Errorf("SendMessage sent chat_id=%q, want %q", gotChatID, "4242")
+	}
+
+	if gotText != wantText {
+		t.Errorf("SendMessage sent text=%q, want %q", gotText, wantText)
+	}
+}
+
+// Slice E2: a message Telegram REFUSED is not a message sent.
+//
+// ⚠️ This slice exists for one specific trap. Go's http.Client returns an error only when
+// the request could not be MADE — connection refused, DNS failure, timeout. A response that
+// arrives is a success as far as PostForm is concerned, whatever its status code says. So a
+// 403 sails straight through the `if err != nil` check that is already there, and
+// SendMessage returns nil having delivered precisely nothing.
+//
+// That is not how HTTP libraries in every language behave, and it is not what the code
+// reads like. It is why this test looks almost redundant and is not.
+//
+// 403 is the status under test rather than a generic 500 because it is the one with
+// consequences: Telegram answers 403 when the user has BLOCKED the bot or deleted the chat.
+// That chat will never accept another message, so retrying forever is pure waste — and
+// holding someone's data after they have unmistakably opted out is a compliance question
+// too (docs/COMPLIANCE.md). Pruning the chat is a later slice. Noticing at all is this one.
+func TestTelegram_SendMessage_blockedByUser_returnsError(t *testing.T) {
+	// A user who has blocked the bot. Telegram answers 403, and says why in the body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	err := tg.SendMessage(4242, "hello")
+	if err == nil {
+		t.Fatalf("SendMessage returned a nil error, want one — a 403 means the message was NOT delivered")
+	}
+
+	// The status belongs in the message. Whoever reads this in a log needs to tell a blocked
+	// user (403) from a bad token (401), from rate limiting (429) — three different problems
+	// with three different responses, and an error saying only "send failed" tells them none
+	// of it.
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("SendMessage error = %q, want it to mention the 403 status", err)
+	}
+}
+
+// Slice E3: the bot can hear. SendMessage gave it a voice; this is the other half.
+//
+// getUpdates is where Telegram's wire shape stops resembling ours. Everything the bot works
+// in is a flat bot.Update{ChatID, Text}; what arrives is four levels deep, wrapped in an
+// envelope, and carries a dozen fields nobody here wants. So this slice is a RESHAPE, and
+// the reshape is the whole of it — the HTTP call is the same one SendMessage already makes.
+//
+// The payload below is real, trimmed only of fields that make it longer without making it
+// harder. Note what is deliberately left in: message_id, from, is_bot, date. Nothing reads
+// them, and they must cost nothing — encoding/json silently ignores any field the target
+// struct does not declare, which is what lets a small struct read a large document. That is
+// worth seeing proved rather than assumed, because the opposite (a decoder that errors on
+// unknown fields) is the default in plenty of other languages.
+//
+// ⚠️ TWO updates, not one, and that is not padding. A slice of one can be returned by an
+// implementation that never loops — reads Result[0] and stops — and such an implementation
+// would pass a one-item test and then drop every message but the first in production. The
+// second item is what makes the loop non-optional.
+//
+// They come from DIFFERENT chats on purpose too: each Update must carry its own chat's ID,
+// not the first one's. Getting that wrong sends Ian's reply to a stranger.
+func TestTelegram_GetUpdates_parsesTelegramsPayloadIntoUpdates(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `{"ok":true,"result":[
+			{"update_id":870123456,"message":{"message_id":12,
+				"from":{"id":4242,"is_bot":false,"first_name":"Ian"},
+				"chat":{"id":4242,"first_name":"Ian","type":"private"},
+				"date":1756600000,"text":"/help"}},
+			{"update_id":870123457,"message":{"message_id":13,
+				"from":{"id":99,"is_bot":false,"first_name":"Someone"},
+				"chat":{"id":99,"first_name":"Someone","type":"private"},
+				"date":1756600060,"text":"/follow Keir Starmer"}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	updates, err := tg.GetUpdates()
+	if err != nil {
+		t.Fatalf("GetUpdates returned error: %v", err)
+	}
+
+	if gotPath != "/botTESTTOKEN/getUpdates" {
+		t.Errorf("GetUpdates called %q, want %q", gotPath, "/botTESTTOKEN/getUpdates")
+	}
+
+	// Fatal, not Error: every assertion below indexes into this slice.
+	want := []bot.Update{
+		{ChatID: 4242, Text: "/help"},
+		{ChatID: 99, Text: "/follow Keir Starmer"},
+	}
+	if len(updates) != len(want) {
+		t.Fatalf("GetUpdates returned %d updates, want %d: %+v", len(updates), len(want), updates)
+	}
+
+	// Compared whole rather than field by field. bot.Update is two comparable fields, so ==
+	// works, and comparing the whole value means a third field added later is checked here
+	// for free instead of being quietly ignored by an assertion that names two.
+	for i, w := range want {
+		if updates[i] != w {
+			t.Errorf("updates[%d] = %+v, want %+v", i, updates[i], w)
+		}
+	}
+}
+
+// Slice E4: the bot stops answering the same message forever.
+//
+// Telegram's getUpdates queue is not drained by reading it. An update stays in the queue,
+// and comes back on every subsequent call, until it is ACKNOWLEDGED — which is done by
+// passing offset on a later call, meaning "I have everything below this number, don't send
+// it again". Telegram then deletes those updates and never sends them again.
+//
+// So GetUpdates as it stands is not merely incomplete, it is a hazard: poll it in a loop and
+// the bot re-answers every message it has ever received, several times a second, forever.
+// This slice is what makes the poll loop of Phase D possible at all.
+//
+// ⚠️ offset is the id to START AT, not the last one seen — so it is the highest update_id
+// received PLUS ONE. Pass the highest id unchanged and Telegram resends that one update on
+// every call: an off-by-one that does not fail loudly, it just makes the bot repeat itself
+// exactly once per poll. That is the whole substance of this slice, hence the exact value
+// asserted below rather than a "greater than" check that the bug would satisfy.
+//
+// This test calls GetUpdates TWICE against a server that records what each call asked for.
+// The two calls are the point: nothing about a single call can show that the bot remembered
+// anything.
+func TestTelegram_GetUpdates_secondCall_acknowledgesTheFirstBatch(t *testing.T) {
+	// What each call asked to start from, in order.
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+
+		// First call: two updates. Second and later: an empty queue, which is what Telegram
+		// returns once everything has been acknowledged.
+		if len(offsets) == 1 {
+			fmt.Fprint(w, `{"ok":true,"result":[
+				{"update_id":870123456,"message":{"chat":{"id":4242},"text":"/help"}},
+				{"update_id":870123457,"message":{"chat":{"id":99},"text":"/list"}}
+			]}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":[]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	first, err := tg.GetUpdates()
+	if err != nil {
+		t.Fatalf("first GetUpdates returned error: %v", err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first GetUpdates returned %d updates, want 2: %+v", len(first), first)
+	}
+
+	second, err := tg.GetUpdates()
+	if err != nil {
+		t.Fatalf("second GetUpdates returned error: %v", err)
+	}
+
+	if len(offsets) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(offsets))
+	}
+
+	// Nothing has been received yet, so there is nothing to acknowledge and the first call
+	// must not skip anything. Absent and "0" both mean that to Telegram, so either passes —
+	// the behaviour under test is "starts from the beginning", not which way you say it.
+	if offsets[0] != "" && offsets[0] != "0" {
+		t.Errorf("first GetUpdates asked for offset=%q, want none — nothing had been received, so nothing may be skipped", offsets[0])
+	}
+
+	// The highest update_id seen was 870123457, so the next call starts at 870123458.
+	// ⚠️ If this says 870123457 you have passed the last id rather than the next one, and
+	// Telegram will resend that update on every single poll.
+	if offsets[1] != "870123458" {
+		t.Errorf("second GetUpdates asked for offset=%q, want %q — the highest update_id seen (870123457) PLUS ONE", offsets[1], "870123458")
+	}
+
+	// The acknowledged batch is gone, so there is nothing left. An empty queue is the normal
+	// case, not a failure: nil slice, nil error.
+	if len(second) != 0 {
+		t.Errorf("second GetUpdates returned %d updates, want 0: %+v", len(second), second)
+	}
+}
