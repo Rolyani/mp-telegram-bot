@@ -2382,3 +2382,82 @@ func TestTelegram_GetUpdates_parsesTelegramsPayloadIntoUpdates(t *testing.T) {
 		}
 	}
 }
+
+// Slice E4: the bot stops answering the same message forever.
+//
+// Telegram's getUpdates queue is not drained by reading it. An update stays in the queue,
+// and comes back on every subsequent call, until it is ACKNOWLEDGED — which is done by
+// passing offset on a later call, meaning "I have everything below this number, don't send
+// it again". Telegram then deletes those updates and never sends them again.
+//
+// So GetUpdates as it stands is not merely incomplete, it is a hazard: poll it in a loop and
+// the bot re-answers every message it has ever received, several times a second, forever.
+// This slice is what makes the poll loop of Phase D possible at all.
+//
+// ⚠️ offset is the id to START AT, not the last one seen — so it is the highest update_id
+// received PLUS ONE. Pass the highest id unchanged and Telegram resends that one update on
+// every call: an off-by-one that does not fail loudly, it just makes the bot repeat itself
+// exactly once per poll. That is the whole substance of this slice, hence the exact value
+// asserted below rather than a "greater than" check that the bug would satisfy.
+//
+// This test calls GetUpdates TWICE against a server that records what each call asked for.
+// The two calls are the point: nothing about a single call can show that the bot remembered
+// anything.
+func TestTelegram_GetUpdates_secondCall_acknowledgesTheFirstBatch(t *testing.T) {
+	// What each call asked to start from, in order.
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+
+		// First call: two updates. Second and later: an empty queue, which is what Telegram
+		// returns once everything has been acknowledged.
+		if len(offsets) == 1 {
+			fmt.Fprint(w, `{"ok":true,"result":[
+				{"update_id":870123456,"message":{"chat":{"id":4242},"text":"/help"}},
+				{"update_id":870123457,"message":{"chat":{"id":99},"text":"/list"}}
+			]}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":[]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	first, err := tg.GetUpdates()
+	if err != nil {
+		t.Fatalf("first GetUpdates returned error: %v", err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first GetUpdates returned %d updates, want 2: %+v", len(first), first)
+	}
+
+	second, err := tg.GetUpdates()
+	if err != nil {
+		t.Fatalf("second GetUpdates returned error: %v", err)
+	}
+
+	if len(offsets) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(offsets))
+	}
+
+	// Nothing has been received yet, so there is nothing to acknowledge and the first call
+	// must not skip anything. Absent and "0" both mean that to Telegram, so either passes —
+	// the behaviour under test is "starts from the beginning", not which way you say it.
+	if offsets[0] != "" && offsets[0] != "0" {
+		t.Errorf("first GetUpdates asked for offset=%q, want none — nothing had been received, so nothing may be skipped", offsets[0])
+	}
+
+	// The highest update_id seen was 870123457, so the next call starts at 870123458.
+	// ⚠️ If this says 870123457 you have passed the last id rather than the next one, and
+	// Telegram will resend that update on every single poll.
+	if offsets[1] != "870123458" {
+		t.Errorf("second GetUpdates asked for offset=%q, want %q — the highest update_id seen (870123457) PLUS ONE", offsets[1], "870123458")
+	}
+
+	// The acknowledged batch is gone, so there is nothing left. An empty queue is the normal
+	// case, not a failure: nil slice, nil error.
+	if len(second) != 0 {
+		t.Errorf("second GetUpdates returned %d updates, want 0: %+v", len(second), second)
+	}
+}
