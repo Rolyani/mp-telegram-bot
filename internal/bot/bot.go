@@ -284,7 +284,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	switch cmd {
 	case "/start":
 		b.store.AddChat(update.ChatID)
-		return reply(update.ChatID, "Welcome! Send /start to get going."), nil
+		return reply(update.ChatID, "Welcome! Please follow MPs to recieve updates."), nil
 	case "/stop":
 		b.store.RemoveChat(update.ChatID)
 		return reply(update.ChatID, "Your details have been removed."), nil
@@ -377,10 +377,25 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/latest":
 		return b.latest(update.ChatID), nil
 	case "/help":
+		// Grouped by what a user is trying to do, not by the order the switch happens to
+		// dispatch in: the commands that DO something first, then the ones that describe the
+		// bot, then the ones that govern the subscription and the data. The blank lines are
+		// what make the grouping visible on a phone, where this arrives as one message.
 		return reply(update.ChatID,
-			"Follow MPs by typing their name or the post code into /follow.\n"+
-				"/start will look for the last activity for the followed MPs.\n"+
-				"/forgetme will wipe all of your data."), nil
+			"/find <name> look up an MP by name.\n"+
+				"/follow <name> follow an MP by typing their name.\n"+
+				"/unfollow <name> stop following an MP.\n"+
+				"/list see who you're currently following.\n"+
+				"/latest fetch up to three recent items for each MP you follow.\n"+
+				"\n"+
+				"/help show this help text.\n"+
+				"/privacy states what data this bot stores.\n"+
+				"/source https://github.com/Rolyani/mp-telegram-bot\n"+
+				"\n"+
+				"/start allows the bot to message you with followed MPs updates.\n"+
+				"/stop stop the bot from sending you messages. Your followed MPs are still kept.\n"+
+				"/forgetme will wipe all of your data.",
+		), nil
 	case "/forgetme":
 		b.store.ForgetChat(update.ChatID)
 		return reply(update.ChatID, "Your follows and account have been removed."), nil

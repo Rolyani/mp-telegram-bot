@@ -17,11 +17,13 @@ func TestRun_help_writesTheHelpReply(t *testing.T) {
 		t.Fatalf("run() returned error: %v", err)
 	}
 
-	// A distinctive line of the /help reply rather than the whole thing: what this slice
-	// proves is the wiring — a line of input becomes a reply on the writer — and the help
-	// wording is known to be wrong and due a rewrite. The wiring test should survive it.
+	// A single command name out of the /help reply rather than a sentence of it. What this
+	// slice proves is the WIRING — a line of input becomes a reply on the writer — so it must
+	// survive the help rewrite that is happening now. It previously pinned a whole sentence,
+	// which would have gone red the moment that sentence was reworded, and gone red HERE, in
+	// cmd, for a change made in internal/bot: the worst kind of failure to read.
 	got := out.String()
-	want := "/forgetme will wipe all of your data."
+	want := "/forgetme"
 	if !strings.Contains(got, want) {
 		t.Errorf("run() wrote %q, want it to contain %q", got, want)
 	}

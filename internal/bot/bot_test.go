@@ -1760,6 +1760,56 @@ func TestHandleUpdate_help_repliesWithHelpTextDistinctFromDefault(t *testing.T) 
 	}
 }
 
+// Slice E6 (session 2, shipping): /help names every command the bot actually answers.
+//
+// The existing slice-16 test above proves /help is dispatched to its own case at all. This
+// one is about the CONTENT being true: the shipped help text names three of the eleven
+// commands and claims /start fetches activity, which it has never done. Harmless while
+// nobody could run the bot; the first thing a real user reads the moment it is on Telegram.
+//
+// The list below is the switch in HandleUpdate, read off case by case. That is deliberate:
+// the test's job is to fail the day a twelfth command is added and the help is not updated
+// with it, which is exactly how this drifted in the first place.
+//
+// ⚠️ It asserts each command is MENTIONED, not how it is described. Wording is yours —
+// pinning the sentences here would mean every improvement to the prose breaks a test, and
+// the help would stop being improved. What cannot be tested this way is the false claim
+// about /start: "does not say something untrue" has no assertion. Read the case bodies and
+// describe what they actually do.
+func TestHandleUpdate_help_namesEveryCommand(t *testing.T) {
+	b := bot.New(bot.NewMemoryStore(), nil, nil)
+
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/help"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/help) returned error: %v", err)
+	}
+
+	// Every case in HandleUpdate's switch, minus the default fallback.
+	commands := []string{
+		"/start",
+		"/stop",
+		"/find",
+		"/follow",
+		"/unfollow",
+		"/list",
+		"/latest",
+		"/help",
+		"/forgetme",
+		"/privacy",
+		"/source",
+	}
+
+	for _, cmd := range commands {
+		// A subtest per command so one missing command reports as one named failure
+		// ("--- FAIL: .../latest") rather than eleven lines of noise you have to read.
+		t.Run(cmd, func(t *testing.T) {
+			if !strings.Contains(reply.Text, cmd) {
+				t.Errorf("/help does not mention %s\ngot:\n%s", cmd, reply.Text)
+			}
+		})
+	}
+}
+
 // Slice 17 (Phase A, static commands): /privacy returns a reply addressed to the chat
 // with its own privacy text. Like /help (slice 16), the point is that /privacy is
 // genuinely dispatched to its OWN case, not swallowed by the default fallback — so we
