@@ -26,6 +26,7 @@ type Telegram struct {
 	baseURL string
 	token   string
 	client  *http.Client
+	offset  int64
 }
 
 // NewTelegram returns a Telegram that talks to the Bot API at baseURL, authenticating as
@@ -108,15 +109,25 @@ func (t *Telegram) SendMessage(chatID int64, text string) error {
 // concept, and nothing else has any business knowing that "chat" and "message" are separate
 // things to Telegram.
 //
-// ⚠️ It has no offset yet, so every call returns the SAME messages from the start of the
-// queue — Telegram only drops an update once it has been acknowledged by a later call
-// passing offset = update_id + 1. Poll in a loop as it stands and the bot answers every
-// message forever. That is the next slice, and it is why update_id is not read here.
+// Each call acknowledges the one before it. Telegram holds an update in the queue until a
+// later call passes offset = update_id + 1, and keeps redelivering it until then — so without
+// this the bot would answer every message it has ever received, on every single poll. The
+// high-water mark is kept on the Telegram value rather than passed in by the caller: it is
+// bookkeeping about a conversation with Telegram, and nothing outside this type has any use
+// for it or any way to get it right.
+//
+// ⚠️ The offset only ever moves FORWARD, and only when a batch actually arrives. "Highest id
+// seen plus one" computed over an EMPTY batch is 1, which would wind the offset back to the
+// start of the queue and redeliver everything; the comparison in the loop below is what makes
+// an empty batch a no-op instead.
 //
 // An empty queue is not an error: it is the normal outcome of most calls, and comes back as
 // a nil slice with a nil error.
 func (t *Telegram) GetUpdates() ([]Update, error) {
-	endpoint := t.baseURL + "/bot" + t.token + "/getUpdates"
+	values := url.Values{}
+	values.Set("offset", strconv.FormatInt(t.offset, 10))
+
+	endpoint := t.baseURL + "/bot" + t.token + "/getUpdates?" + values.Encode()
 
 	resp, err := t.client.Get(endpoint)
 	if err != nil {
@@ -130,11 +141,17 @@ func (t *Telegram) GetUpdates() ([]Update, error) {
 	}
 
 	// Only the fields that are actually read are declared. encoding/json ignores the rest —
-	// update_id, from, date, message_id and the dozen others Telegram sends — so the struct
-	// stays the size of what the bot needs rather than the size of the document.
+	// from, date, message_id and the dozen others Telegram sends — so the struct stays the size
+	// of what the bot needs rather than the size of the document.
+	//
+	// ⚠️ update_id needs the struct tag and the others do not. encoding/json matches a name
+	// exactly, then case-insensitively, which is why Chat/chat and Text/text bind with no tag —
+	// but the underscore in update_id defeats that, and an untagged UpdateID would stay 0 with
+	// NO error reported. Note also that it sits ALONGSIDE message on the wire, not inside it.
 	var payload struct {
 		Result []struct {
-			Message struct {
+			UpdateID int64 `json:"update_id"`
+			Message  struct {
 				Chat struct {
 					ID int64
 				}
@@ -150,6 +167,9 @@ func (t *Telegram) GetUpdates() ([]Update, error) {
 	// Reach through the nesting for the two values that matter and drop the container.
 	var updates []Update
 	for _, result := range payload.Result {
+		if result.UpdateID >= t.offset {
+			t.offset = result.UpdateID + 1
+		}
 		updates = append(updates, Update{
 			ChatID: result.Message.Chat.ID,
 			Text:   result.Message.Text,
