@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -57,4 +58,41 @@ func run(in io.Reader, out io.Writer) error {
 	// told apart afterwards rather than inside the loop. A nil here means the input simply
 	// ran out.
 	return scanner.Err()
+}
+
+// pollOnce runs one poll cycle: it fetches whatever Telegram is holding, answers each message,
+// and sends every reply back. It returns when the batch is done, so the caller owns the pacing.
+//
+// One cycle rather than a loop, deliberately. A loop here would never return, which makes it
+// untestable except by building a stop condition into production code purely so a test can end
+// it. Everything worth getting wrong is in the cycle; the loop around it is a `for` and a sleep.
+//
+// ⚠️ A failing update does not abandon the batch. One MP's lookup failing during a busy poll
+// must not cost the other subscribers their replies, so every failure is collected and the
+// cycle carries on — errors.Join returns nil when nothing failed, so the happy path needs no
+// special case. A failure to REACH Telegram at all is different and returns immediately: there
+// is no point walking a batch that cannot be answered.
+//
+// ⚠️ The reply is sent before HandleUpdate's error is recorded, and that order is required
+// rather than tidy. Its two return values are not either/or: a lookup that failed still carries
+// the sentence explaining so, and returning early would answer that user with silence. See the
+// doc comment on HandleUpdate.
+func pollOnce(b *bot.Bot, tg *bot.Telegram) error {
+	updates, err := tg.GetUpdates()
+	if err != nil {
+		return err
+	}
+
+	var failures []error
+	for _, update := range updates {
+		reply, err := b.HandleUpdate(update)
+		if sendErr := tg.SendMessage(reply.ChatID, reply.Text); sendErr != nil {
+			failures = append(failures, sendErr)
+		}
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+
+	return errors.Join(failures...)
 }
