@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,29 +9,6 @@ import (
 
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
-
-// This test is in package main, not package main_test, because a main package cannot be
-// imported — so a black-box test has nothing to import and run would be unreachable. It is
-// the one place the usual preference for external test packages cannot apply.
-func TestRun_help_writesTheHelpReply(t *testing.T) {
-	in := strings.NewReader("/help\n")
-	var out bytes.Buffer
-
-	if err := run(in, &out); err != nil {
-		t.Fatalf("run() returned error: %v", err)
-	}
-
-	// A single command name out of the /help reply rather than a sentence of it. What this
-	// slice proves is the WIRING — a line of input becomes a reply on the writer — so it must
-	// survive the help rewrite that is happening now. It previously pinned a whole sentence,
-	// which would have gone red the moment that sentence was reworded, and gone red HERE, in
-	// cmd, for a change made in internal/bot: the worst kind of failure to read.
-	got := out.String()
-	want := "/forgetme"
-	if !strings.Contains(got, want) {
-		t.Errorf("run() wrote %q, want it to contain %q", got, want)
-	}
-}
 
 // Slice T1 (critical path, session 3): one poll cycle. What is waiting at Telegram is
 // fetched, handled, and the reply sent back to Telegram — the whole round trip, for one
@@ -100,4 +76,56 @@ func TestPollOnce_waitingMessage_isAnsweredBackToTelegram(t *testing.T) {
 	if !strings.Contains(sentText, "/forgetme") {
 		t.Errorf("sent text %q, want it to contain %q", sentText, "/forgetme")
 	}
+}
+
+// Slice T2 (critical path, session 3): the token comes from the environment, and a missing
+// one stops the program with a sentence that says which variable is missing.
+//
+// ⚠️ This is the slice with a security point rather than a functional one. The token is the
+// whole of the bot's identity — anyone holding it can read every message sent to the bot and
+// post as it — so it must never be a string in the source, where it would reach GitHub on the
+// next push and stay in the history after being deleted. The environment is where it lives,
+// and the program's job is to notice when it is not there.
+//
+// The failure has to be LOUD for a reason worth understanding. Starting with an empty token is
+// not a quiet degradation: every call to Telegram comes back 401 Unauthorized, which looks
+// exactly like an outage or a network problem from the logs. A bot that refuses to start and
+// names the variable turns an hour of confused debugging into one line of output.
+//
+// Tested with t.Setenv rather than by threading a getenv function through the code: it sets
+// the real variable, restores it when the test ends, and needs no seam in production code that
+// exists only for tests. (It also makes the test unable to run in parallel, which is the cost.)
+func TestTelegramFromEnv(t *testing.T) {
+	t.Run("missing token is refused by name", func(t *testing.T) {
+		t.Setenv("TELEGRAM_TOKEN", "")
+
+		tg, err := telegramFromEnv()
+		if err == nil {
+			t.Fatalf("telegramFromEnv() with no token returned nil error, want a refusal")
+		}
+
+		// The variable's name has to be IN the message. "missing token" sends the reader
+		// looking; "TELEGRAM_TOKEN is not set" tells them exactly what to do next.
+		if !strings.Contains(err.Error(), "TELEGRAM_TOKEN") {
+			t.Errorf("error is %q, want it to name TELEGRAM_TOKEN so the reader knows what to set", err)
+		}
+
+		// Nothing usable may come back alongside the error. A non-nil Telegram here invites a
+		// caller to press on with an unauthenticated client.
+		if tg != nil {
+			t.Errorf("telegramFromEnv() returned a Telegram %v alongside the error, want nil", tg)
+		}
+	})
+
+	t.Run("token present gives a usable Telegram", func(t *testing.T) {
+		t.Setenv("TELEGRAM_TOKEN", "123456:FAKE-TOKEN-FOR-TESTS")
+
+		tg, err := telegramFromEnv()
+		if err != nil {
+			t.Fatalf("telegramFromEnv() with a token returned error: %v", err)
+		}
+		if tg == nil {
+			t.Fatal("telegramFromEnv() returned nil Telegram with no error")
+		}
+	})
 }
