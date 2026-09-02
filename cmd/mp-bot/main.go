@@ -132,7 +132,13 @@ func pollOnce(b *bot.Bot, tg *bot.Telegram) error {
 // timeout. Logged as issue 20; the fix is to confirm sends back to the store, which is a shape
 // change best made when the store moves to Postgres.
 func pushOnce(b *bot.Bot, tg *bot.Telegram) error {
-	replies := b.CheckActivity()
+	// ⚠️ Returned immediately rather than collected into failures below. A store that cannot be
+	// read has not told us there is nothing to send — it has told us nothing at all, and the
+	// difference matters: carrying on would report a successful cycle that delivered nothing.
+	replies, err := b.CheckActivity()
+	if err != nil {
+		return err
+	}
 
 	var failures []error
 	for _, reply := range replies {
