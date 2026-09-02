@@ -129,3 +129,169 @@ func TestTelegramFromEnv(t *testing.T) {
 		}
 	})
 }
+
+// stubSource is an activity source that answers every member with the same canned items. The
+// bot package has its own fake for this; that one is unexported and lives in package bot_test,
+// and ActivitySource is a one-method interface, so satisfying it here costs three lines and
+// keeps this test from depending on the other package's fixtures.
+//
+// It ignores memberID deliberately: which MP the items belong to is the bot's business and is
+// already tested there. What is under test here is the wiring between CheckActivity and
+// Telegram, so the source only has to produce something to send.
+type stubSource struct {
+	items []bot.Activity
+}
+
+func (s stubSource) Activity(memberID int) []bot.Activity { return s.items }
+
+// Slice T3 (critical path, session 3): the bot speaks WITHOUT being spoken to. Everything up
+// to here has been request/response — a message arrives, a reply goes back. This is the first
+// thing the bot does on its own initiative, and it is the whole point of the product: you
+// follow an MP and later your phone tells you how they voted.
+//
+// ⚠️ It is a SEPARATE cycle from pollOnce, not a step inside it, and the reason is cadence.
+// Answering a message must feel immediate, so pollOnce runs every couple of seconds. Asking
+// Parliament what an MP has been voting on has no such need and a real cost — it is somebody
+// else's API, it is not paid for by us, and once per followed MP per two seconds would be
+// abusive. Two cycles let main run them on two clocks. Folding the check into pollOnce would
+// weld the polite rate to the responsive one.
+//
+// The store is populated directly rather than through /start and /follow. Those commands have
+// their own tests in the bot package, including the baseline that makes this safe
+// (TestHandleUpdate_follow_baselinesExistingActivity); driving them again here would test them
+// twice and this — whether CheckActivity's replies reach Telegram — not at all.
+func TestPushOnce_newActivity_isSentToTheFollower(t *testing.T) {
+	// Every sendMessage the bot made, in order: chat_id then text.
+	type sent struct{ chatID, text string }
+	var messages []sent
+	var getUpdatesCalls int
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("sendMessage body did not parse as a form: %v", err)
+			}
+			messages = append(messages, sent{r.FormValue("chat_id"), r.FormValue("text")})
+			fmt.Fprint(w, `{"ok":true}`)
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			getUpdatesCalls++
+			fmt.Fprint(w, `{"ok":true,"result":[]}`)
+		default:
+			t.Errorf("unexpected request to %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	store := bot.NewMemoryStore()
+	store.AddChat(4242)
+	store.FollowMP(4242, bot.Member{ID: 4514, Name: "Lindsay Hoyle"})
+
+	src := stubSource{items: []bot.Activity{
+		{ID: "division-1", Text: "Voted Aye on: Something Bill"},
+		{ID: "division-2", Text: "Voted No on: Another Bill"},
+	}}
+
+	// nil resolver: pushing activity never resolves a name. A nil here is a statement that
+	// this path does not use one, and would panic loudly if that stopped being true.
+	b := bot.New(store, nil, src)
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	if err := pushOnce(b, tg); err != nil {
+		t.Fatalf("pushOnce() returned error: %v", err)
+	}
+
+	// One message per new item. Batching them into one would read better on a phone and is a
+	// different decision from this one; what must not happen is an item going missing.
+	if len(messages) != 2 {
+		t.Fatalf("sendMessage called %d times, want 2: %+v", len(messages), messages)
+	}
+
+	for _, m := range messages {
+		if m.chatID != "4242" {
+			t.Errorf("activity sent to chat %q, want %q — a push goes to the follower, not to whoever spoke last", m.chatID, "4242")
+		}
+	}
+
+	// Both items, in whichever order the bot produced them: the ordering of a batch is not
+	// what this slice decides.
+	texts := messages[0].text + "\n" + messages[1].text
+	for _, want := range []string{"Something Bill", "Another Bill"} {
+		if !strings.Contains(texts, want) {
+			t.Errorf("sent texts %q, want them to include %q", texts, want)
+		}
+	}
+
+	// ⚠️ A push is not a poll. Reading the update queue here would acknowledge messages the
+	// bot has not answered — GetUpdates moves the offset past everything it returns, so the
+	// commands in that batch would be dropped, unanswered and unrecoverable.
+	if getUpdatesCalls != 0 {
+		t.Errorf("pushOnce called getUpdates %d times, want 0 — pushing must not touch the update queue or it silently discards unanswered messages", getUpdatesCalls)
+	}
+
+	// Nothing new has happened since, so a second push has nothing to say. CheckActivity
+	// records what it has sent; this is the check that pushOnce does not re-send it.
+	messages = nil
+	if err := pushOnce(b, tg); err != nil {
+		t.Fatalf("second pushOnce() returned error: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("second pushOnce sent %d messages, want 0 — the same division must not arrive twice: %+v", len(messages), messages)
+	}
+}
+
+// ⚠️ One follower's send failing must not cost the others theirs — the same rule pollOnce
+// already follows, and it matters more here. A push fans one event out to everybody following
+// that MP, so a single blocked chat (403, the commonest failure there is) would otherwise
+// silence a division for every other subscriber in the batch.
+//
+// The failure is keyed on chat_id rather than call order because CheckActivity walks the
+// store's chats, whose order comes from a map and is deliberately not fixed.
+func TestPushOnce_oneFailedSend_doesNotAbandonTheRest(t *testing.T) {
+	var attempted []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			t.Errorf("unexpected request to %s", r.URL.Path)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("sendMessage body did not parse as a form: %v", err)
+		}
+		chatID := r.FormValue("chat_id")
+		attempted = append(attempted, chatID)
+
+		// Chat 1 has blocked the bot. Telegram answers 403 and will do so forever.
+		if chatID == "1" {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	mp := bot.Member{ID: 4514, Name: "Lindsay Hoyle"}
+	store := bot.NewMemoryStore()
+	for _, chatID := range []int64{1, 2} {
+		store.AddChat(chatID)
+		store.FollowMP(chatID, mp)
+	}
+
+	src := stubSource{items: []bot.Activity{{ID: "division-1", Text: "Voted Aye on: Something Bill"}}}
+	b := bot.New(store, nil, src)
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	err := pushOnce(b, tg)
+
+	// Both were tried. One attempt means the batch was abandoned at the first 403.
+	if len(attempted) != 2 {
+		t.Fatalf("sendMessage attempted for %d chats, want 2 — a blocked chat must not stop the others being told: %v", len(attempted), attempted)
+	}
+
+	// And the failure is still reported. Carrying on is not the same as pretending it worked:
+	// main prints this, and a chat failing every push forever is how anyone finds out.
+	if err == nil {
+		t.Error("pushOnce() returned nil error, want the failed send reported")
+	}
+}

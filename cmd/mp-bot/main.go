@@ -25,6 +25,11 @@ import (
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
 
+const (
+	pollEvery = 2 * time.Second
+	pushEvery = time.Hour
+)
+
 // main wires the program up and owns the loop, and is deliberately the one function no test
 // covers. It takes no arguments and returns nothing, so there is no seam to push a fixture
 // through — which is exactly why everything with a decision in it lives in telegramFromEnv
@@ -44,11 +49,20 @@ func main() {
 
 	b := bot.New(bot.NewMemoryStore(), bot.NewResolver("https://members-api.parliament.uk"), bot.NewVotesSource("https://commonsvotes-api.parliament.uk"))
 
+	polls := time.NewTicker(pollEvery)
+	pushes := time.NewTicker(pushEvery)
+
 	for {
-		if err := pollOnce(b, tg); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+		select {
+		case <-polls.C:
+			if err := pollOnce(b, tg); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
+		case <-pushes.C:
+			if err := pushOnce(b, tg); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
 		}
-		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -83,6 +97,19 @@ func pollOnce(b *bot.Bot, tg *bot.Telegram) error {
 		}
 		if err != nil {
 			failures = append(failures, err)
+		}
+	}
+
+	return errors.Join(failures...)
+}
+
+func pushOnce(b *bot.Bot, tg *bot.Telegram) error {
+	replies := b.CheckActivity()
+
+	var failures []error
+	for _, reply := range replies {
+		if sendErr := tg.SendMessage(reply.ChatID, reply.Text); sendErr != nil {
+			failures = append(failures, sendErr)
 		}
 	}
 
