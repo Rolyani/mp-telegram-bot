@@ -81,12 +81,42 @@ type NameResolver interface {
 	ResolveName(name string) ([]Member, error)
 }
 
+// Store is everything the bot needs to remember between messages: who has started a
+// conversation, which MPs each of them follows, and which activity items have already been
+// sent to whom.
+//
+// It is an interface so that the bot does not know which store it is holding. Until now it
+// held a *MemoryStore concretely, which was honest while there was only one — but the state
+// above cannot survive a restart in a map, and this bot is going to run in a homelab that
+// restarts. A PostgresStore satisfying this interface is the next slice, and Bot needs no
+// change to accept it.
+//
+// ⚠️ The nine methods here are exactly the ones Bot calls, and no more. HasChat is a
+// *MemoryStore method used only by tests and is deliberately absent: in Go an interface
+// belongs to the CONSUMER, so it lists what the caller needs rather than everything the type
+// can do. A shorter interface is also a smaller thing for the next implementation to get
+// right.
+//
+// MemoryStore does not mention Store anywhere and does not need to. There is no `implements`
+// keyword — having the methods IS the implementation.
+type Store interface {
+	AddChat(chatID int64)
+	RemoveChat(chatID int64)
+	ForgetChat(chatID int64)
+	Chats() []int64
+	FollowMP(chatID int64, mp Member)
+	UnfollowMP(chatID int64, id int) bool
+	Follows(chatID int64) []Member
+	MarkSent(chatID int64, activityID string)
+	WasSent(chatID int64, activityID string) bool
+}
+
 // Bot holds the collaborators a command handler needs. Commands are answered by methods on
 // Bot rather than free functions so that dependencies arrive as fields: /find needs a name
 // resolver and /latest will need an activity source, and neither should become another
 // parameter on every call site.
 type Bot struct {
-	store    *MemoryStore
+	store    Store
 	resolver NameResolver
 	source   ActivitySource
 }
@@ -98,7 +128,7 @@ type Bot struct {
 // once a name is supplied, since both reject an empty name before making any request.
 // Every other command works with a nil resolver, and the tests pass nil deliberately to
 // record that they never reach the network.
-func New(store *MemoryStore, resolver NameResolver, source ActivitySource) *Bot {
+func New(store Store, resolver NameResolver, source ActivitySource) *Bot {
 	return &Bot{store: store, resolver: resolver, source: source}
 }
 
