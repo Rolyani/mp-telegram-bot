@@ -100,15 +100,15 @@ type NameResolver interface {
 // MemoryStore does not mention Store anywhere and does not need to. There is no `implements`
 // keyword — having the methods IS the implementation.
 type Store interface {
-	AddChat(chatID int64)
-	RemoveChat(chatID int64)
-	ForgetChat(chatID int64)
-	Chats() []int64
-	FollowMP(chatID int64, mp Member)
-	UnfollowMP(chatID int64, id int) bool
-	Follows(chatID int64) []Member
-	MarkSent(chatID int64, activityID string)
-	WasSent(chatID int64, activityID string) bool
+	AddChat(chatID int64) error
+	RemoveChat(chatID int64) error
+	ForgetChat(chatID int64) error
+	Chats() ([]int64, error)
+	FollowMP(chatID int64, mp Member) error
+	UnfollowMP(chatID int64, id int) (bool, error)
+	Follows(chatID int64) ([]Member, error)
+	MarkSent(chatID int64, activityID string) error
+	WasSent(chatID int64, activityID string) (bool, error)
 }
 
 // Bot holds the collaborators a command handler needs. Commands are answered by methods on
@@ -141,14 +141,20 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// AddChat records a chat ID
-func (s *MemoryStore) AddChat(chatID int64) {
+// AddChat records a chat ID.
+//
+// ⚠️ Every MemoryStore method returns an error and every one of them returns nil. That is not
+// ceremony: Store's methods have to be able to fail because Postgres can, and this is the one
+// implementation for which the answer is always "it worked". A map write cannot fail.
+func (s *MemoryStore) AddChat(chatID int64) error {
 	s.chats[chatID] = true
+	return nil
 }
 
 // RemoveChat forgets a chat ID
-func (s *MemoryStore) RemoveChat(chatID int64) {
+func (s *MemoryStore) RemoveChat(chatID int64) error {
 	delete(s.chats, chatID)
+	return nil
 }
 
 // HasChat reports whether the chat was recorded
@@ -159,8 +165,9 @@ func (s *MemoryStore) HasChat(chatID int64) bool {
 // FollowMP records that chatID follows mp. The MP arrives already resolved: the store
 // keeps identities, and deciding WHICH member a typed name meant belongs to the caller,
 // which is the only layer with a user to ask.
-func (s *MemoryStore) FollowMP(chatID int64, mp Member) {
+func (s *MemoryStore) FollowMP(chatID int64, mp Member) error {
 	s.follows[chatID] = append(s.follows[chatID], mp)
+	return nil
 }
 
 // UnfollowMP removes the MP with the given member ID from chatID's follow list, leaving any
@@ -171,7 +178,7 @@ func (s *MemoryStore) FollowMP(chatID int64, mp Member) {
 // the store keeps identities, and working out WHICH member a typed name meant is the caller's
 // job, because the caller is the only layer with a user it can ask. Matching here as well
 // would mean the same decision being made in two places, and only one of them can ask.
-func (s *MemoryStore) UnfollowMP(chatID int64, id int) bool {
+func (s *MemoryStore) UnfollowMP(chatID int64, id int) (bool, error) {
 	keep := s.follows[chatID][:0]
 	removed := false
 	for _, f := range s.follows[chatID] {
@@ -182,74 +189,95 @@ func (s *MemoryStore) UnfollowMP(chatID int64, id int) bool {
 		}
 	}
 	s.follows[chatID] = keep
-	return removed
+	return removed, nil
 }
 
 // Follows returns the MPs that chatID follows.
-func (s *MemoryStore) Follows(chatID int64) []Member {
-	return s.follows[chatID]
+func (s *MemoryStore) Follows(chatID int64) ([]Member, error) {
+	return s.follows[chatID], nil
 }
 
 // Chats returns the recorded chat IDs
-func (s *MemoryStore) Chats() []int64 {
+func (s *MemoryStore) Chats() ([]int64, error) {
 	keys := make([]int64, 0, len(s.chats))
 	for k := range s.chats {
 		keys = append(keys, k)
 	}
-	return keys
+	return keys, nil
 }
 
 // Broadcast builds one reply per recorded subscriber, carrying msg.
-func Broadcast(msg string, store *MemoryStore) []Reply {
-	chats := store.Chats()
+//
+// ⚠️ Nothing in the program calls this. It predates CheckActivity, which is how messages
+// actually reach subscribers now, and it survives only because it has a test. Logged for
+// deletion rather than deleted here, since removing code is its own decision.
+func Broadcast(msg string, store *MemoryStore) ([]Reply, error) {
+	chats, err := store.Chats()
+	if err != nil {
+		return nil, err
+	}
 	replies := make([]Reply, 0, len(chats))
 	for _, id := range chats {
 		replies = append(replies, Reply{ChatID: id, Text: msg})
 	}
-	return replies
+	return replies, nil
 }
 
 // CheckActivity polls the source for every followed MP and builds one reply per activity
 // item, addressed to each chat that follows that MP. An item already sent to a chat is
 // not sent again, so each follower sees a given item exactly once.
-func (b *Bot) CheckActivity() []Reply {
-	chats := b.store.Chats()
+func (b *Bot) CheckActivity() ([]Reply, error) {
+	chats, err := b.store.Chats()
+	if err != nil {
+		return nil, err
+	}
 	replies := make([]Reply, 0, len(chats))
 	for _, id := range chats {
-		follows := b.store.Follows(id)
+		follows, err := b.store.Follows(id)
+		if err != nil {
+			return nil, err
+		}
 		for _, mp := range follows {
 			// Polled by ID, never by name. The name in a follow record is a snapshot
 			// taken when the user followed and nothing keeps it in sync; the ID is the
 			// only part of it Parliament will still recognise later.
 			data := b.source.Activity(mp.ID)
 			for _, act := range data {
-				if b.store.WasSent(id, act.ID) {
+				sent, err := b.store.WasSent(id, act.ID)
+				if err != nil {
+					return nil, err
+				}
+				if sent {
 					continue
 				}
 				replies = append(replies, Reply{ChatID: id, Text: act.Text})
-				b.store.MarkSent(id, act.ID)
+				if err := b.store.MarkSent(id, act.ID); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
-	return replies
+	return replies, nil
 }
 
 // ForgetChat removes the chat's subscription and its entire follow list. It does not
 // yet clear the per-chat already-sent set (s.seen) — that's a separate behavior.
-func (s *MemoryStore) ForgetChat(chatID int64) {
+func (s *MemoryStore) ForgetChat(chatID int64) error {
 	delete(s.follows, chatID)
 	delete(s.chats, chatID)
+	return nil
 }
 
-func (s *MemoryStore) MarkSent(chatID int64, activityID string) {
+func (s *MemoryStore) MarkSent(chatID int64, activityID string) error {
 	if s.seen[chatID] == nil {
 		s.seen[chatID] = make(map[string]bool)
 	}
 	s.seen[chatID][activityID] = true
+	return nil
 }
 
-func (s *MemoryStore) WasSent(chatID int64, activityID string) bool {
-	return s.seen[chatID][activityID]
+func (s *MemoryStore) WasSent(chatID int64, activityID string) (bool, error) {
+	return s.seen[chatID][activityID], nil
 }
 
 // reply addresses text back to the chat that sent the command. Every branch of
@@ -271,6 +299,8 @@ const apiDown = "Sorry, I couldn't connect to the Parliament API. Try again soon
 // does not vary by command. Distinct from apiDown on purpose — "we couldn't ask" and "we
 // asked and nobody matched" are different situations and the user can act on the difference.
 const noSuchMP = "No MPs with that name found."
+
+const storeDown = "Sorry, I couldn't save that just now. Try again soon."
 
 // memberNames projects members onto their display names, ready to be joined into a reply.
 // A projection cannot filter in place the way UnfollowMP does — []Member and []string have
@@ -313,10 +343,16 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	cmd, arg, _ := strings.Cut(update.Text, " ")
 	switch cmd {
 	case "/start":
-		b.store.AddChat(update.ChatID)
+		// ⚠️ The confirmation is only reached if the write succeeded. A user welcomed into a
+		// subscription that was never recorded has no way to discover it.
+		if err := b.store.AddChat(update.ChatID); err != nil {
+			return reply(update.ChatID, storeDown), err
+		}
 		return reply(update.ChatID, "Welcome! Please follow MPs to recieve updates."), nil
 	case "/stop":
-		b.store.RemoveChat(update.ChatID)
+		if err := b.store.RemoveChat(update.ChatID); err != nil {
+			return reply(update.ChatID, storeDown), err
+		}
 		return reply(update.ChatID, "Your details have been removed."), nil
 	case "/find":
 		name := strings.TrimSpace(arg)
@@ -366,10 +402,18 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 			return r, nil
 		}
 		mp := members[0]
-		b.store.FollowMP(update.ChatID, mp)
+		if err := b.store.FollowMP(update.ChatID, mp); err != nil {
+			return reply(update.ChatID, storeDown), err
+		}
+		// ⚠️ A half-written baseline is worse than none: the follow IS recorded, so the next
+		// push would deliver every division this loop did not reach. Bailing out here still
+		// leaves that hole, which is why the message says the follow did not stick — the user
+		// is being asked to try again, which re-runs the whole baseline.
 		existingActivity := b.source.Activity(mp.ID)
 		for _, act := range existingActivity {
-			b.store.MarkSent(update.ChatID, act.ID)
+			if err := b.store.MarkSent(update.ChatID, act.ID); err != nil {
+				return reply(update.ChatID, storeDown), err
+			}
 		}
 		return reply(update.ChatID, "Now following "+mp.Name+"."), nil
 	case "/unfollow":
@@ -377,7 +421,11 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		if name == "" {
 			return reply(update.ChatID, "Please enter an MP's name to unfollow."), nil
 		}
-		matches := matchingFollows(b.store.Follows(update.ChatID), name)
+		follows, err := b.store.Follows(update.ChatID)
+		if err != nil {
+			return reply(update.ChatID, storeDown), err
+		}
+		matches := matchingFollows(follows, name)
 		if len(matches) == 0 {
 			return reply(update.ChatID, "You were not following this MP."), nil
 		}
@@ -398,10 +446,15 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		// UnfollowMP returns has nothing left to tell us. The confirmation names the MP
 		// actually removed rather than what was typed: "Smith" is not who you unfollowed.
 		mp := matches[0]
-		b.store.UnfollowMP(update.ChatID, mp.ID)
+		if _, err := b.store.UnfollowMP(update.ChatID, mp.ID); err != nil {
+			return reply(update.ChatID, storeDown), err
+		}
 		return reply(update.ChatID, "You have unfollowed "+mp.Name+"."), nil
 	case "/list":
-		follows := b.store.Follows(update.ChatID)
+		follows, err := b.store.Follows(update.ChatID)
+		if err != nil {
+			return reply(update.ChatID, storeDown), err
+		}
 		if len(follows) == 0 {
 			return reply(update.ChatID, "You are not following any MPs yet."), nil
 		}
@@ -409,7 +462,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		// lookup: /list stays offline, and cannot fail because the Members API is down.
 		return reply(update.ChatID, "You follow: "+strings.Join(memberNames(follows), ", ")), nil
 	case "/latest":
-		return b.latest(update.ChatID), nil
+		return b.latest(update.ChatID)
 	case "/help":
 		// Grouped by what a user is trying to do, not by the order the switch happens to
 		// dispatch in: the commands that DO something first, then the ones that describe the
@@ -431,7 +484,12 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 				"/forgetme will wipe all of your data.",
 		), nil
 	case "/forgetme":
-		b.store.ForgetChat(update.ChatID)
+		// ⚠️ This one is a GDPR erasure request, so a failed delete must never be reported as
+		// a successful one. Telling someone their data is gone when it is not is the worst
+		// version of this whole class of bug.
+		if err := b.store.ForgetChat(update.ChatID); err != nil {
+			return reply(update.ChatID, storeDown), err
+		}
 		return reply(update.ChatID, "Your follows and account have been removed."), nil
 	case "/privacy":
 		return reply(update.ChatID,
@@ -456,12 +514,15 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 // It returns no error. Every path here answers in words, including both empty cases, and an
 // error that is always nil is a promise the signature cannot keep. Whoever gives the activity
 // source a failure mode is the one who should change that, with a test that forces it.
-func (b *Bot) latest(chatID int64) Reply {
+func (b *Bot) latest(chatID int64) (Reply, error) {
 	// Fetched live rather than read from the store: unlike /list, this command cannot
 	// answer offline, because the whole point of it is what Parliament says right now.
-	follows := b.store.Follows(chatID)
+	follows, err := b.store.Follows(chatID)
+	if err != nil {
+		return reply(chatID, storeDown), err
+	}
 	if len(follows) == 0 {
-		return reply(chatID, "You are not following any MPs yet.")
+		return reply(chatID, "You are not following any MPs yet."), nil
 	}
 
 	// One item, and whose it is.
@@ -496,7 +557,7 @@ func (b *Bot) latest(chatID int64) Reply {
 	}
 
 	if len(items) == 0 {
-		return reply(chatID, "Your followed MPs have not made any contributions yet.")
+		return reply(chatID, "Your followed MPs have not made any contributions yet."), nil
 	}
 
 	// One sort over everything, newest first — this is what makes /latest mean latest
@@ -581,5 +642,5 @@ func (b *Bot) latest(chatID int64) Reply {
 
 	// Reading is not delivering: /latest deliberately does not MarkSent, so the poll
 	// loop still owes the user these items. Ratcheted in the /latest tests.
-	return reply(chatID, strings.Join(texts, "\n"))
+	return reply(chatID, strings.Join(texts, "\n")), nil
 }

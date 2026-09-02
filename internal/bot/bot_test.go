@@ -75,6 +75,46 @@ func knownMPs(names ...string) *fakeResolver {
 	return &fakeResolver{matches: matches}
 }
 
+// checkActivity runs b.CheckActivity and fails the test if it reports an error.
+//
+// Every test that uses it is built on a MemoryStore, which cannot fail, so an error here means
+// the test's own setup is wrong rather than a case worth asserting on. The failure path has its
+// own test (TestCheckActivity_storeFails_reportsRatherThanPushingNothing) with a failingStore.
+// Naming that once keeps seven call sites from either repeating the check or — much worse —
+// discarding the error with `replies, _ :=`, which is the habit this whole slice exists to break.
+func checkActivity(t *testing.T, b *bot.Bot) []bot.Reply {
+	t.Helper()
+	replies, err := b.CheckActivity()
+	if err != nil {
+		t.Fatalf("CheckActivity() returned error: %v", err)
+	}
+	return replies
+}
+
+// storeFollows and storeChats read a MemoryStore directly to assert what a command recorded.
+//
+// They exist for the same reason as checkActivity: these reads now return an error that is
+// always nil for a MemoryStore, and writing `got, _ := store.Follows(7)` at twenty call sites
+// would teach the exact habit slice F1 was written to break. Failing the test on an error
+// nobody expects is both safer and shorter.
+func storeFollows(t *testing.T, store *bot.MemoryStore, chatID int64) []bot.Member {
+	t.Helper()
+	got, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("store.Follows(%d) returned error: %v", chatID, err)
+	}
+	return got
+}
+
+func storeChats(t *testing.T, store *bot.MemoryStore) []int64 {
+	t.Helper()
+	got, err := store.Chats()
+	if err != nil {
+		t.Fatalf("store.Chats() returned error: %v", err)
+	}
+	return got
+}
+
 // Slice B1 (Phase B, the HTTP seam): given the Members API's search JSON for a name, the
 // resolver returns that MP's durable member ID. This is the first network slice, and the
 // behavior forces the whole seam into existence: a Resolver with an INJECTABLE base URL
@@ -339,7 +379,7 @@ func TestHandleUpdate_latest_repliesWithActivityForEveryFollowedMP(t *testing.T)
 	}
 
 	// RATCHET: reading is not delivering — the poll loop still owes the user both items.
-	if pushed := b.CheckActivity(); len(pushed) != 2 {
+	if pushed := checkActivity(t, b); len(pushed) != 2 {
 		t.Errorf("poll delivered %d items after /latest, want 2: /latest must not mark items sent", len(pushed))
 	}
 }
@@ -909,7 +949,7 @@ func TestCheckActivity_twoMPsShareADisplayName_eachChatGetsOnlyItsOwn(t *testing
 		102: {{ID: "v42", Text: "voted on Bill 42"}},
 	}}
 
-	replies := bot.New(store, nil, source).CheckActivity()
+	replies := checkActivity(t, bot.New(store, nil, source))
 
 	// One item each. Under name-based polling both chats would receive both items.
 	if len(replies) != 2 {
@@ -953,12 +993,12 @@ func TestCheckActivity_itemAlreadySent_notPushedAgain(t *testing.T) {
 
 	b := bot.New(store, nil, source)
 
-	first := b.CheckActivity()
+	first := checkActivity(t, b)
 	if len(first) != 1 {
 		t.Fatalf("first poll: got %d replies, want 1", len(first))
 	}
 
-	second := b.CheckActivity()
+	second := checkActivity(t, b)
 	if len(second) != 0 {
 		t.Errorf("second poll re-pushed %d already-sent item(s), want 0", len(second))
 	}
@@ -978,7 +1018,7 @@ func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
 		4514: {{ID: "v42", Text: "voted on Bill 42"}},
 	}}
 
-	replies := bot.New(store, nil, source).CheckActivity()
+	replies := checkActivity(t, bot.New(store, nil, source))
 
 	if len(replies) != 1 {
 		t.Fatalf("got %d replies, want 1", len(replies))
@@ -1080,7 +1120,7 @@ func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 				t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
 			}
 
-			if got := store.Follows(7); len(got) != 0 {
+			if got := storeFollows(t, store, 7); len(got) != 0 {
 				t.Errorf("store.Follows(7) = %v, want nothing recorded for %q", got, text)
 			}
 			if reply.ChatID != 7 {
@@ -1120,7 +1160,7 @@ func TestHandleUpdate_unfollow_removesNamedMPOnly(t *testing.T) {
 	}
 
 	// Assert: only the unfollowed MP is gone; the other remains.
-	got := store.Follows(42)
+	got := storeFollows(t, store, 42)
 	if len(got) != 1 || got[0].Name != kept {
 		t.Fatalf("store.Follows(42) = %v, want exactly [%q]", got, kept)
 	}
@@ -1172,7 +1212,7 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 			}
 
 			// The existing follow must be untouched — a nameless /unfollow removes nothing.
-			if got := store.Follows(7); len(got) != 1 || got[0].Name != followed {
+			if got := storeFollows(t, store, 7); len(got) != 1 || got[0].Name != followed {
 				t.Errorf("store.Follows(7) = %v, want unchanged [%q] for %q", got, followed, text)
 			}
 			if reply.ChatID != 7 {
@@ -1221,7 +1261,7 @@ func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
 	}
 
 	// No-op: the unrelated follow is left untouched.
-	if got := store.Follows(7); len(got) != 1 || got[0].Name != other {
+	if got := storeFollows(t, store, 7); len(got) != 1 || got[0].Name != other {
 		t.Errorf("store.Follows(7) = %v, want unchanged [%q]", got, other)
 	}
 	if reply.ChatID != 7 {
@@ -1271,7 +1311,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 	}
 
 	// The target is gone, the other remains.
-	if got := store.Follows(7); len(got) != 1 || got[0].Name != other {
+	if got := storeFollows(t, store, 7); len(got) != 1 || got[0].Name != other {
 		t.Fatalf("store.Follows(7) = %v, want exactly [%q]", got, other)
 	}
 	// The target WAS removed, so the reply must be the success confirmation — identical
@@ -1311,7 +1351,7 @@ func TestHandleUpdate_forgetme_wipesSubscriptionAndFollows(t *testing.T) {
 	if store.HasChat(42) {
 		t.Errorf("chat 42 still recorded after /forgetme, want it removed")
 	}
-	if got := store.Follows(42); len(got) != 0 {
+	if got := storeFollows(t, store, 42); len(got) != 0 {
 		t.Errorf("store.Follows(42) = %v after /forgetme, want nothing", got)
 	}
 
@@ -1593,7 +1633,7 @@ func TestHandleUpdate_follow_resolvesNameAndRecordsMemberID(t *testing.T) {
 	}
 
 	// Assert: the MP is recorded as the resolver identified them — ID included.
-	got := store.Follows(42)
+	got := storeFollows(t, store, 42)
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("store.Follows(42) = %v, want exactly [%v]", got, want)
 	}
@@ -1623,7 +1663,10 @@ func TestBroadcast_sendsMessageToEverySubscriber(t *testing.T) {
 	}
 
 	const msg = "Division at 7pm"
-	replies := bot.Broadcast(msg, store)
+	replies, err := bot.Broadcast(msg, store)
+	if err != nil {
+		t.Fatalf("Broadcast returned error: %v", err)
+	}
 
 	got := make(map[int64]string)
 	for _, r := range replies {
@@ -1693,7 +1736,7 @@ func TestHandleUpdate_repeatedStart_recordsChatOnce(t *testing.T) {
 		}
 	}
 
-	got := store.Chats()
+	got := storeChats(t, store)
 	if len(got) != 1 || got[0] != 7 {
 		t.Fatalf("store.Chats() = %v, want exactly [7]", got)
 	}
@@ -1939,7 +1982,7 @@ func TestHandleUpdate_follow_unknownName_recordsNothingAndSaysSo(t *testing.T) {
 		t.Fatalf("HandleUpdate(/follow Wibblethorpe) returned error: %v, want nil — no such MP is an answer, not a failure", err)
 	}
 
-	if got := store.Follows(9); len(got) != 0 {
+	if got := storeFollows(t, store, 9); len(got) != 0 {
 		t.Errorf("store.Follows(9) = %v, want nothing recorded for a name nobody has", got)
 	}
 
@@ -1996,7 +2039,7 @@ func TestHandleUpdate_follow_severalMatches_offersChoicesAndFollowsNobody(t *tes
 	}
 
 	// Assert: an ambiguous follow commits to nothing. Picking one silently is the bug.
-	if got := store.Follows(9); len(got) != 0 {
+	if got := storeFollows(t, store, 9); len(got) != 0 {
 		t.Errorf("store.Follows(9) = %v, want nothing followed until the user has chosen", got)
 	}
 
@@ -2025,7 +2068,7 @@ func TestHandleUpdate_follow_severalMatches_offersChoicesAndFollowsNobody(t *tes
 				t.Fatalf("replaying choice %q returned error: %v", choice, err)
 			}
 
-			got := chosenStore.Follows(9)
+			got := storeFollows(t, chosenStore, 9)
 			if len(got) != 1 || got[0] != smiths[i] {
 				t.Errorf("sending choice %q back recorded %v, want exactly %v — a choice must be a message that follows that one MP", choice, got, smiths[i])
 			}
@@ -2046,8 +2089,8 @@ func TestHandleUpdate_follow_singleMatch_offersNoChoices(t *testing.T) {
 		t.Fatalf("HandleUpdate(/follow Keir Starmer) returned error: %v", err)
 	}
 
-	if len(store.Follows(9)) != 1 {
-		t.Fatalf("store.Follows(9) = %v, want the single match followed outright", store.Follows(9))
+	if len(storeFollows(t, store, 9)) != 1 {
+		t.Fatalf("store.Follows(9) = %v, want the single match followed outright", storeFollows(t, store, 9))
 	}
 	if len(reply.Choices) != 0 {
 		t.Errorf("reply offered choices %q for an unambiguous name, want none — there is nothing to choose", reply.Choices)
@@ -2097,7 +2140,7 @@ func TestHandleUpdate_unfollowPartialName_removesTheFollowItMatches(t *testing.T
 	}
 
 	// The load-bearing assertion: she is actually gone.
-	if got := store.Follows(42); len(got) != 0 {
+	if got := storeFollows(t, store, 42); len(got) != 0 {
 		t.Fatalf("store.Follows(42) = %v, want empty — %q should have matched the followed %q", got, typed, followed)
 	}
 	// ...and the bot reports a removal, not a miss. Without this, a green that deleted her
@@ -2154,7 +2197,7 @@ func TestHandleUpdate_unfollow_severalFollowsMatch_removesNoneAndOffersChoices(t
 	}
 
 	store, b := followingBoth(t)
-	want := append([]bot.Member(nil), store.Follows(42)...)
+	want := append([]bot.Member(nil), storeFollows(t, store, 42)...)
 	if len(want) != len(names) {
 		t.Fatalf("setup recorded %v, want %d follows", want, len(names))
 	}
@@ -2165,7 +2208,7 @@ func TestHandleUpdate_unfollow_severalFollowsMatch_removesNoneAndOffersChoices(t
 	}
 
 	// Assert: an ambiguous unfollow commits to nothing. Dropping either one is the bug.
-	got := store.Follows(42)
+	got := storeFollows(t, store, 42)
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("store.Follows(42) = %v, want %v unchanged until the user has chosen", got, want)
 	}
@@ -2191,7 +2234,7 @@ func TestHandleUpdate_unfollow_severalFollowsMatch_removesNoneAndOffersChoices(t
 				t.Fatalf("replaying choice %q returned error: %v", choice, err)
 			}
 
-			left := chosenStore.Follows(42)
+			left := storeFollows(t, chosenStore, 42)
 			if len(left) != 1 || left[0] != want[1-i] {
 				t.Errorf("sending choice %q back left %v, want exactly %v — a choice must be a message that unfollows that one MP", choice, left, want[1-i])
 			}
@@ -2556,7 +2599,7 @@ func TestHandleUpdate_follow_baselinesExistingActivity(t *testing.T) {
 
 	// The whole point: history is not news. Everything that existed at the moment of the
 	// follow has been accounted for, so the first poll has nothing to say.
-	if replies := b.CheckActivity(); len(replies) != 0 {
+	if replies := checkActivity(t, b); len(replies) != 0 {
 		t.Fatalf("first CheckActivity after /follow returned %d replies, want 0 — everything that existed at follow time is history, not news: %+v", len(replies), replies)
 	}
 
@@ -2565,7 +2608,7 @@ func TestHandleUpdate_follow_baselinesExistingActivity(t *testing.T) {
 	// above.
 	items[4514] = append(items[4514], bot.Activity{ID: "division-3", Text: "Voted Aye on: A Bill Voted On After The Follow"})
 
-	replies := b.CheckActivity()
+	replies := checkActivity(t, b)
 	if len(replies) != 1 {
 		t.Fatalf("CheckActivity after a NEW division returned %d replies, want 1: %+v", len(replies), replies)
 	}
@@ -2673,5 +2716,89 @@ func TestTelegram_GetUpdates_updateIDEqualToTheOffset_stillAcknowledgesIt(t *tes
 
 	if offsets[2] != "870123458" {
 		t.Errorf("third GetUpdates asked for offset=%q, want %q — update 870123457 arrived and was handled, so it must be acknowledged even though its id equalled the offset requested", offsets[2], "870123458")
+	}
+}
+
+// failingStore is a Store where every method fails. It exists because MemoryStore cannot fail —
+// a map write does not return an error — so until now nothing in the suite could describe what
+// the bot does when its memory is broken. Postgres can fail in half a dozen ordinary ways
+// (dropped connection, restart, disk full), so this is the shape the bot has to survive.
+//
+// ⚠️ Reads return the ZERO value alongside the error, deliberately: no chats, no follows, not
+// sent. That is the trap being guarded against. A caller that ignores the error sees a perfectly
+// plausible empty world — nobody follows anyone, nothing has been sent — and behaves as if that
+// were true rather than as if it were unknown.
+type failingStore struct {
+	err error
+}
+
+func (f failingStore) AddChat(chatID int64) error                     { return f.err }
+func (f failingStore) RemoveChat(chatID int64) error                  { return f.err }
+func (f failingStore) ForgetChat(chatID int64) error                  { return f.err }
+func (f failingStore) Chats() ([]int64, error)                        { return nil, f.err }
+func (f failingStore) FollowMP(chatID int64, mp bot.Member) error     { return f.err }
+func (f failingStore) UnfollowMP(chatID int64, id int) (bool, error)  { return false, f.err }
+func (f failingStore) Follows(chatID int64) ([]bot.Member, error)     { return nil, f.err }
+func (f failingStore) MarkSent(chatID int64, activityID string) error { return f.err }
+func (f failingStore) WasSent(chatID int64, activityID string) (bool, error) {
+	return false, f.err
+}
+
+// Slice F1 (session 4, Postgres): the store is allowed to fail, and a failure is neither hidden
+// from the user nor mistaken for a fact.
+//
+// ⚠️ This is the slice that has to happen BEFORE PostgresStore, not after. Store's methods
+// currently return nothing, which was free while MemoryStore was the only implementation and is
+// a lie the moment a database is involved. Writing the nine Postgres methods first would mean
+// writing them twice.
+//
+// /follow is the command that shows why it matters. A user who is told "Now following Lindsay
+// Hoyle" and is not, in fact, following anybody has no way to discover that: /list will look
+// wrong to them and right to the bot. The confirmation must be earned by a write that actually
+// happened.
+func TestHandleUpdate_follow_storeFails_doesNotConfirmTheFollow(t *testing.T) {
+	broken := failingStore{err: errors.New("dial tcp: connection refused")}
+	b := bot.New(broken, knownMPs("Lindsay Hoyle"), fakeSource{})
+
+	r, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow Lindsay Hoyle"})
+
+	// The failure is reported. Same rule the resolver already follows: a reply AND an error, so
+	// the user gets a sentence and the operator gets something in the log.
+	if err == nil {
+		t.Fatalf("HandleUpdate(/follow) with a broken store returned nil error, want the failure reported; reply was %q", r.Text)
+	}
+
+	// ⚠️ The one that matters. Confirming a write that did not happen is worse than any error
+	// message, because it is undetectable from the user's side.
+	if strings.Contains(r.Text, "Now following") {
+		t.Errorf("reply was %q — the bot confirmed a follow it failed to save", r.Text)
+	}
+
+	// And it still says something. Answering a user with silence is never right; see the doc
+	// comment on HandleUpdate.
+	if strings.TrimSpace(r.Text) == "" {
+		t.Error("reply text is empty, want a sentence explaining that it could not be saved")
+	}
+	if r.ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", r.ChatID)
+	}
+}
+
+// ⚠️ A read that fails must not read as an empty world. This is the quieter half of the same
+// slice and the more dangerous one: CheckActivity walks Chats() and Follows(), and a dropped
+// connection returns nil for both. Without an error the bot concludes that nobody follows
+// anybody, pushes nothing, and reports success — every hour, indefinitely, while looking
+// perfectly healthy in the logs.
+func TestCheckActivity_storeFails_reportsRatherThanPushingNothing(t *testing.T) {
+	broken := failingStore{err: errors.New("dial tcp: connection refused")}
+	b := bot.New(broken, nil, fakeSource{})
+
+	replies, err := b.CheckActivity()
+
+	if err == nil {
+		t.Fatalf("CheckActivity() with a broken store returned nil error, want the failure reported; got %d replies", len(replies))
+	}
+	if len(replies) != 0 {
+		t.Errorf("CheckActivity() returned %d replies from a broken store, want none: %+v", len(replies), replies)
 	}
 }
