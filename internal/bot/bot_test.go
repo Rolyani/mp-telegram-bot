@@ -998,7 +998,7 @@ func TestCheckActivity_itemForFollowedMP_repliesToSubscriber(t *testing.T) {
 func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
 	mps := []string{"Keir Starmer", "Rishi Sunak"}
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs(mps...), nil)
+	b := bot.New(store, knownMPs(mps...), fakeSource{})
 
 	for _, mp := range mps {
 		if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}); err != nil {
@@ -1028,7 +1028,7 @@ func TestHandleUpdate_list_repliesWithFollowedMPs(t *testing.T) {
 // not pinned — only non-empty, and distinct from the with-follows reply.
 func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs("Keir Starmer"), nil)
+	b := bot.New(store, knownMPs("Keir Starmer"), fakeSource{})
 
 	empty, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/list"})
 	if err != nil {
@@ -1065,7 +1065,7 @@ func TestHandleUpdate_list_whenFollowingNobody_distinctReply(t *testing.T) {
 func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 	// Capture the success confirmation behaviorally so we can assert the hint differs
 	// from it without hardcoding either string.
-	confirm, err := bot.New(bot.NewMemoryStore(), knownMPs("Keir Starmer"), nil).HandleUpdate(bot.Update{ChatID: 1, Text: "/follow Keir Starmer"})
+	confirm, err := bot.New(bot.NewMemoryStore(), knownMPs("Keir Starmer"), fakeSource{}).HandleUpdate(bot.Update{ChatID: 1, Text: "/follow Keir Starmer"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/follow <name>) returned error: %v", err)
 	}
@@ -1073,7 +1073,7 @@ func TestHandleUpdate_followWithoutName_recordsNothingAndHints(t *testing.T) {
 	for _, text := range []string{"/follow", "/follow   "} {
 		t.Run(text, func(t *testing.T) {
 			store := bot.NewMemoryStore()
-			b := bot.New(store, nil, nil)
+			b := bot.New(store, nil, fakeSource{})
 
 			reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: text})
 			if err != nil {
@@ -1106,7 +1106,7 @@ func TestHandleUpdate_unfollow_removesNamedMPOnly(t *testing.T) {
 	const removed = "Keir Starmer"
 
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs(removed, kept), nil)
+	b := bot.New(store, knownMPs(removed, kept), fakeSource{})
 
 	for _, mp := range []string{removed, kept} {
 		if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + mp}); err != nil {
@@ -1147,7 +1147,7 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 	// usage hint rather than a name-less "success" — and avoids hardcoding any wording.
 	const realName = "Keir Starmer"
 	confirmStore := bot.NewMemoryStore()
-	confirmBot := bot.New(confirmStore, knownMPs(realName), nil)
+	confirmBot := bot.New(confirmStore, knownMPs(realName), fakeSource{})
 	if _, err := confirmBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + realName}); err != nil {
 		t.Fatalf("follow setup for confirmation failed: %v", err)
 	}
@@ -1161,7 +1161,7 @@ func TestHandleUpdate_unfollowWithoutName_changesNothingAndHints(t *testing.T) {
 		t.Run(text, func(t *testing.T) {
 			const followed = "Rishi Sunak"
 			store := bot.NewMemoryStore()
-			b := bot.New(store, knownMPs(followed), nil)
+			b := bot.New(store, knownMPs(followed), fakeSource{})
 			if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + followed}); err != nil {
 				t.Fatalf("follow setup failed: %v", err)
 			}
@@ -1199,7 +1199,7 @@ func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
 
 	// Arm A: chat genuinely follows mp, then unfollows — capture the real success reply.
 	following := bot.NewMemoryStore()
-	followingBot := bot.New(following, knownMPs(mp), nil)
+	followingBot := bot.New(following, knownMPs(mp), fakeSource{})
 	if _, err := followingBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + mp}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
@@ -1211,7 +1211,7 @@ func TestHandleUpdate_unfollowUnknownName_noOpAndDistinctReply(t *testing.T) {
 	// Arm B: chat follows someone ELSE, then unfollows mp it never followed.
 	const other = "Rishi Sunak"
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs(other), nil)
+	b := bot.New(store, knownMPs(other), fakeSource{})
 	if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + other}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
@@ -1248,7 +1248,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 
 	// Reference: the success confirmation when the chat follows ONLY the target.
 	solo := bot.NewMemoryStore()
-	soloBot := bot.New(solo, knownMPs(target), nil)
+	soloBot := bot.New(solo, knownMPs(target), fakeSource{})
 	if _, err := soloBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + target}); err != nil {
 		t.Fatalf("solo follow setup failed: %v", err)
 	}
@@ -1259,7 +1259,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 
 	// The chat under test follows the target AND someone else, then unfollows the target.
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs(target, other), nil)
+	b := bot.New(store, knownMPs(target, other), fakeSource{})
 	for _, mp := range []string{target, other} {
 		if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow " + mp}); err != nil {
 			t.Fatalf("follow setup for %q failed: %v", mp, err)
@@ -1290,7 +1290,7 @@ func TestHandleUpdate_unfollowFollowedAmongOthers_reportsSuccess(t *testing.T) {
 // and non-empty; wording stays free.
 func TestHandleUpdate_forgetme_wipesSubscriptionAndFollows(t *testing.T) {
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs("Keir Starmer", "Rishi Sunak"), nil)
+	b := bot.New(store, knownMPs("Keir Starmer", "Rishi Sunak"), fakeSource{})
 
 	// The chat is fully present: subscribed via /start and following two MPs.
 	if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/start"}); err != nil {
@@ -1578,7 +1578,7 @@ func TestHandleUpdate_follow_resolvesNameAndRecordsMemberID(t *testing.T) {
 		mp: {want},
 	}}
 	store := bot.NewMemoryStore()
-	b := bot.New(store, resolver, nil)
+	b := bot.New(store, resolver, fakeSource{})
 
 	// Capture the welcome behaviorally so we can assert the confirmation differs
 	// from it without hardcoding either string.
@@ -1924,7 +1924,7 @@ func TestHandleUpdate_follow_unknownName_recordsNothingAndSaysSo(t *testing.T) {
 	// records cannot leak into the assertions below. Neither wording is pinned; this also
 	// doubles as a check that the happy path C0 built still works after the guard lands.
 	confirmStore := bot.NewMemoryStore()
-	confirm, err := bot.New(confirmStore, knownMPs("Keir Starmer"), nil).HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Keir Starmer"})
+	confirm, err := bot.New(confirmStore, knownMPs("Keir Starmer"), fakeSource{}).HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Keir Starmer"})
 	if err != nil {
 		t.Fatalf("HandleUpdate(/follow Keir Starmer) returned error: %v", err)
 	}
@@ -1932,7 +1932,7 @@ func TestHandleUpdate_follow_unknownName_recordsNothingAndSaysSo(t *testing.T) {
 	store := bot.NewMemoryStore()
 	// The resolver knows Keir Starmer and nobody else, so any other name resolves to no
 	// matches — exactly what the live API returns for a name nobody has.
-	b := bot.New(store, knownMPs("Keir Starmer"), nil)
+	b := bot.New(store, knownMPs("Keir Starmer"), fakeSource{})
 
 	reply, err := b.HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Wibblethorpe"})
 	if err != nil {
@@ -1988,7 +1988,7 @@ func TestHandleUpdate_follow_severalMatches_offersChoicesAndFollowsNobody(t *tes
 	}
 
 	store := bot.NewMemoryStore()
-	b := bot.New(store, &fakeResolver{matches: matches}, nil)
+	b := bot.New(store, &fakeResolver{matches: matches}, fakeSource{})
 
 	reply, err := b.HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Smith"})
 	if err != nil {
@@ -2019,7 +2019,7 @@ func TestHandleUpdate_follow_severalMatches_offersChoicesAndFollowsNobody(t *tes
 	for i, choice := range reply.Choices {
 		t.Run(choice, func(t *testing.T) {
 			chosenStore := bot.NewMemoryStore()
-			chosen := bot.New(chosenStore, &fakeResolver{matches: matches}, nil)
+			chosen := bot.New(chosenStore, &fakeResolver{matches: matches}, fakeSource{})
 
 			if _, err := chosen.HandleUpdate(bot.Update{ChatID: 9, Text: choice}); err != nil {
 				t.Fatalf("replaying choice %q returned error: %v", choice, err)
@@ -2039,7 +2039,7 @@ func TestHandleUpdate_follow_severalMatches_offersChoicesAndFollowsNobody(t *tes
 // while making the common case worse.
 func TestHandleUpdate_follow_singleMatch_offersNoChoices(t *testing.T) {
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs("Keir Starmer"), nil)
+	b := bot.New(store, knownMPs("Keir Starmer"), fakeSource{})
 
 	reply, err := b.HandleUpdate(bot.Update{ChatID: 9, Text: "/follow Keir Starmer"})
 	if err != nil {
@@ -2075,7 +2075,7 @@ func TestHandleUpdate_unfollowPartialName_removesTheFollowItMatches(t *testing.T
 	// Reference: what the bot says when the fragment genuinely matches nothing followed.
 	const unrelated = "Rishi Sunak"
 	missStore := bot.NewMemoryStore()
-	missBot := bot.New(missStore, knownMPs(unrelated), nil)
+	missBot := bot.New(missStore, knownMPs(unrelated), fakeSource{})
 	if _, err := missBot.HandleUpdate(bot.Update{ChatID: 1, Text: "/follow " + unrelated}); err != nil {
 		t.Fatalf("reference follow setup failed: %v", err)
 	}
@@ -2086,7 +2086,7 @@ func TestHandleUpdate_unfollowPartialName_removesTheFollowItMatches(t *testing.T
 
 	// The chat under test follows exactly one MP, whose name CONTAINS the typed fragment.
 	store := bot.NewMemoryStore()
-	b := bot.New(store, knownMPs(followed), nil)
+	b := bot.New(store, knownMPs(followed), fakeSource{})
 	if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + followed}); err != nil {
 		t.Fatalf("follow setup failed: %v", err)
 	}
@@ -2144,7 +2144,7 @@ func TestHandleUpdate_unfollow_severalFollowsMatch_removesNoneAndOffersChoices(t
 	followingBoth := func(t *testing.T) (*bot.MemoryStore, *bot.Bot) {
 		t.Helper()
 		store := bot.NewMemoryStore()
-		b := bot.New(store, knownMPs(names...), nil)
+		b := bot.New(store, knownMPs(names...), fakeSource{})
 		for _, n := range names {
 			if _, err := b.HandleUpdate(bot.Update{ChatID: 42, Text: "/follow " + n}); err != nil {
 				t.Fatalf("follow setup for %q failed: %v", n, err)
@@ -2509,5 +2509,169 @@ func TestTelegram_GetUpdates_secondCall_acknowledgesTheFirstBatch(t *testing.T) 
 	// case, not a failure: nil slice, nil error.
 	if len(second) != 0 {
 		t.Errorf("second GetUpdates returned %d updates, want 0: %+v", len(second), second)
+	}
+}
+
+// Slice P1 (critical path, session 3): following an MP records a baseline, so the first push
+// carries only what happens AFTER the follow.
+//
+// ⚠️ This is spam prevention, and it is the reason the push loop must not ship without it.
+// CheckActivity sends every item it has not sent before, and before this slice "not sent
+// before" includes every division the MP has ever voted in. Follow the Speaker on a Tuesday
+// and the first poll delivers months of history to a phone, one message per item — from a bot
+// the user cannot easily silence except by blocking it, which is permanent.
+//
+// The baseline is taken at follow time because that is the only moment with the right meaning:
+// "from here on". Recording it later would have a gap; recording it earlier is impossible,
+// since nobody was following.
+//
+// ⚠️ It costs an extra call to the activity source inside /follow, which until now did not
+// touch it at all. That is a real cost and worth it: the alternative — a "first poll after a
+// follow is silent" flag — has to store the same information anyway and gets it wrong for an
+// MP who votes between the follow and the first poll.
+func TestHandleUpdate_follow_baselinesExistingActivity(t *testing.T) {
+	mp := bot.Member{ID: 4514, Name: "Lindsay Hoyle"}
+
+	// Two divisions the MP has ALREADY voted in when the user follows. The map is shared with
+	// the bot rather than copied, so the test can add to it later and the bot sees it.
+	items := map[int][]bot.Activity{
+		4514: {
+			{ID: "division-1", Text: "Voted Aye on: Something Bill"},
+			{ID: "division-2", Text: "Voted No on: Another Bill"},
+		},
+	}
+	src := fakeSource{items: items}
+	res := &fakeResolver{matches: map[string][]bot.Member{"Hoyle": {mp}}}
+
+	b := bot.New(bot.NewMemoryStore(), res, src)
+
+	// /start first: CheckActivity walks the recorded chats, so a chat that never started is
+	// never polled and the test would pass for the wrong reason.
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/start"}); err != nil {
+		t.Fatalf("HandleUpdate(/start) returned error: %v", err)
+	}
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/follow Hoyle"}); err != nil {
+		t.Fatalf("HandleUpdate(/follow Hoyle) returned error: %v", err)
+	}
+
+	// The whole point: history is not news. Everything that existed at the moment of the
+	// follow has been accounted for, so the first poll has nothing to say.
+	if replies := b.CheckActivity(); len(replies) != 0 {
+		t.Fatalf("first CheckActivity after /follow returned %d replies, want 0 — everything that existed at follow time is history, not news: %+v", len(replies), replies)
+	}
+
+	// And now something actually happens. This is the half that stops the fix being "never
+	// send anything": a baseline that silenced the MP permanently would also pass the check
+	// above.
+	items[4514] = append(items[4514], bot.Activity{ID: "division-3", Text: "Voted Aye on: A Bill Voted On After The Follow"})
+
+	replies := b.CheckActivity()
+	if len(replies) != 1 {
+		t.Fatalf("CheckActivity after a NEW division returned %d replies, want 1: %+v", len(replies), replies)
+	}
+	if replies[0].ChatID != 7 {
+		t.Errorf("reply addressed to chat %d, want 7", replies[0].ChatID)
+	}
+	if !strings.Contains(replies[0].Text, "After The Follow") {
+		t.Errorf("reply text is %q, want the division that happened after the follow", replies[0].Text)
+	}
+}
+
+// ⚠️ An empty batch must leave the offset alone. This is the failure mode the obvious
+// implementation walks straight into: collect the highest update_id, then set the offset to
+// it plus one AFTER the loop. Over an empty result the highest id is the zero value, so the
+// offset becomes 1 — which to Telegram means "start from the beginning" and redelivers every
+// unacknowledged update, forever, every few seconds.
+//
+// The protection is not a guard clause: it is that the offset is only ever assigned INSIDE
+// the range loop, which an empty batch never enters. Nothing else pins that, which is why
+// this test makes a THIRD call — the second call is where the queue empties, and the third is
+// where the damage would show. A test that stops at the empty response passes either way.
+func TestTelegram_GetUpdates_emptyBatch_doesNotRewindTheOffset(t *testing.T) {
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+
+		// One update, then nothing — the ordinary rhythm of a bot nobody is talking to.
+		if len(offsets) == 1 {
+			fmt.Fprint(w, `{"ok":true,"result":[
+				{"update_id":870123456,"message":{"chat":{"id":4242},"text":"/help"}}
+			]}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":[]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	for i := 1; i <= 3; i++ {
+		if _, err := tg.GetUpdates(); err != nil {
+			t.Fatalf("GetUpdates call %d returned error: %v", i, err)
+		}
+	}
+
+	if len(offsets) != 3 {
+		t.Fatalf("server saw %d requests, want 3", len(offsets))
+	}
+
+	if offsets[1] != "870123457" {
+		t.Fatalf("second GetUpdates asked for offset=%q, want %q — the batch it just read is not acknowledged", offsets[1], "870123457")
+	}
+
+	// The one that matters. "1" here is the rewind.
+	if offsets[2] != "870123457" {
+		t.Errorf("after an EMPTY batch the third GetUpdates asked for offset=%q, want %q unchanged — an empty result acknowledges nothing, so it must move the offset nowhere", offsets[2], "870123457")
+	}
+}
+
+// ⚠️ The comparison that advances the offset must be >=, not >.
+//
+// It looks like a test for an edge case and is a test for the ORDINARY one. Having asked for
+// offset = last+1, the first update Telegram sends back has an update_id of exactly that:
+// asking to start at 870123457 and being handed 870123457 is the queue working correctly, not
+// a duplicate. Under > that update never advances the offset, so it is requested again on the
+// next poll, answered again, and again — the bug the offset exists to prevent, narrowed to one
+// message that never goes away.
+func TestTelegram_GetUpdates_updateIDEqualToTheOffset_stillAcknowledgesIt(t *testing.T) {
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offsets = append(offsets, r.URL.Query().Get("offset"))
+
+		switch len(offsets) {
+		case 1:
+			fmt.Fprint(w, `{"ok":true,"result":[
+				{"update_id":870123456,"message":{"chat":{"id":4242},"text":"/help"}}
+			]}`)
+		case 2:
+			// update_id 870123457 IS the offset just asked for. Telegram is answering the
+			// question that was put to it.
+			fmt.Fprint(w, `{"ok":true,"result":[
+				{"update_id":870123457,"message":{"chat":{"id":4242},"text":"/list"}}
+			]}`)
+		default:
+			fmt.Fprint(w, `{"ok":true,"result":[]}`)
+		}
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	for i := 1; i <= 3; i++ {
+		if _, err := tg.GetUpdates(); err != nil {
+			t.Fatalf("GetUpdates call %d returned error: %v", i, err)
+		}
+	}
+
+	if len(offsets) != 3 {
+		t.Fatalf("server saw %d requests, want 3", len(offsets))
+	}
+
+	if offsets[1] != "870123457" {
+		t.Fatalf("second GetUpdates asked for offset=%q, want %q", offsets[1], "870123457")
+	}
+
+	if offsets[2] != "870123458" {
+		t.Errorf("third GetUpdates asked for offset=%q, want %q — update 870123457 arrived and was handled, so it must be acknowledged even though its id equalled the offset requested", offsets[2], "870123458")
 	}
 }

@@ -337,6 +337,10 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		}
 		mp := members[0]
 		b.store.FollowMP(update.ChatID, mp)
+		existingActivity := b.source.Activity(mp.ID)
+		for _, act := range existingActivity {
+			b.store.MarkSent(update.ChatID, act.ID)
+		}
 		return reply(update.ChatID, "Now following "+mp.Name+"."), nil
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
