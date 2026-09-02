@@ -1,0 +1,99 @@
+package bot
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// PostgresStore is the Store that survives a restart. It is the reason Postgres is in this
+// project at all: MemoryStore loses every chat and every follow when the process stops, and
+// this bot is going to run in a cluster where a pod restart is routine.
+type PostgresStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewPostgresStore connects to the database named by dsn and returns a store ready to use.
+//
+// ⚠️ A POOL, not a connection. This process runs for weeks and the database WILL restart
+// underneath it — a single *pgx.Conn would fail from that moment on, where a pool notices a
+// dead connection and opens another.
+//
+// ⚠️ pgxpool.New does not actually connect. It parses the DSN and returns; the first real
+// connection is made on first use. So a wrong password gives a nil error here and a failure
+// somewhere later, which is the confusing failure mode telegramFromEnv was written to avoid.
+// Ping is what forces the question now, while there is still someone reading the output.
+func NewPostgresStore(dsn string) (*PostgresStore, error) {
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("connect to postgres: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		// The pool is already holding resources, so it has to be handed back before the
+		// error goes up. Nothing else will do it — the caller has no store to Close.
+		pool.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS chats (
+	chat_id BIGINT PRIMARY KEY
+	)`); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create chats table: %w", err)
+	}
+
+	return &PostgresStore{pool: pool}, nil
+}
+
+func (s *PostgresStore) AddChat(chatID int64) error {
+	ctx := context.Background()
+
+	if _, err := s.pool.Exec(ctx, `INSERT INTO chats (chat_id)
+		VALUES ($1) ON CONFLICT DO NOTHING`, chatID); err != nil {
+		return fmt.Errorf("insert into chats: %w", err)
+	}
+
+	return nil
+
+}
+
+// Chats returns every recorded chat ID.
+//
+// ⚠️ The capacity is left at zero rather than guessed. MemoryStore could say len(s.chats)
+// because the map was already in hand; here the row count is not known until the last row has
+// been read, and a wrong guess only costs a copy.
+func (s *PostgresStore) Chats() ([]int64, error) {
+	ctx := context.Background()
+
+	rows, err := s.pool.Query(ctx, `SELECT chat_id FROM chats`)
+	if err != nil {
+		return nil, fmt.Errorf("select chats: %w", err)
+	}
+	// ⚠️ rows holds a connection borrowed from the pool until it is closed. Miss this and the
+	// bot runs for a day and then blocks forever, every query waiting for a free connection.
+	defer rows.Close()
+
+	chats := make([]int64, 0)
+	for rows.Next() {
+		var chatID int64
+		if err := rows.Scan(&chatID); err != nil {
+			return nil, fmt.Errorf("scan chat id: %w", err)
+		}
+		chats = append(chats, chatID)
+	}
+
+	// ⚠️ rows.Next() returns false both for "no more rows" and for "the connection died
+	// mid-read", and the loop cannot tell those apart. rows.Err() is the only thing that can;
+	// without it a broken connection is indistinguishable from an empty subscriber list.
+	return chats, rows.Err()
+}
+
+// Close releases the pool's connections. The program calls it once, at shutdown; the tests call
+// it on every store they open.
+func (s *PostgresStore) Close() {
+	s.pool.Close()
+}
