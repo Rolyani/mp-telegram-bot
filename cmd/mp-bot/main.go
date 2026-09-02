@@ -1,5 +1,6 @@
-// Command mp-bot runs the bot against Telegram: it polls for messages, answers them, and
-// sends the replies back, until it is stopped.
+// Command mp-bot runs the bot against Telegram until it is stopped. It does two things on two
+// clocks: it polls for messages and answers them, and it pushes MPs' new votes to the people
+// following them.
 //
 // It needs TELEGRAM_TOKEN in the environment and reads nothing else. Run it with
 //
@@ -10,10 +11,15 @@
 // message — was deleted once the Telegram loop worked. It existed to make the package runnable
 // at all when nothing else could execute it, and had no caller left.
 //
-// ⚠️ It answers messages; it does not yet send anything unprompted. CheckActivity, which
-// pushes an MP's new votes to the people following them, is not wired to this loop — that
-// needs a baseline recorded at the moment someone follows an MP, or the first push would be
-// the MP's entire back catalogue arriving at once.
+// ⚠️ The two cycles run at deliberately different rates. Answering a message must feel
+// immediate, so pollOnce runs every couple of seconds. Asking Parliament what an MP has been
+// voting on has no such need and a real cost — it is somebody else's API, divisions happen a
+// handful of times on a sitting day and never overnight — so pushOnce runs hourly. They are
+// separate functions rather than one, because folding the push into the poll would weld the
+// polite rate to the responsive one.
+//
+// ⚠️ The push is only safe because /follow records a baseline. Without it the first push would
+// deliver the MP's entire back catalogue, one message per division, to a phone.
 package main
 
 import (
@@ -103,6 +109,28 @@ func pollOnce(b *bot.Bot, tg *bot.Telegram) error {
 	return errors.Join(failures...)
 }
 
+// pushOnce runs one push cycle: it asks the bot what its followers have not been told yet and
+// sends each of those messages. It is the first thing the bot does without being spoken to,
+// and it is the point of the product — request/response is how you configure it, the push is
+// what it is FOR.
+//
+// One cycle rather than a loop, for the same reason as pollOnce: the pacing belongs to the
+// caller, and a function that never returns cannot be tested.
+//
+// ⚠️ It must not call GetUpdates. That would acknowledge the messages in the batch it fetched
+// without answering any of them — Telegram moves the offset past everything it hands over, so
+// those commands would be dropped, unanswered and unrecoverable.
+//
+// ⚠️ One failed send does not abandon the batch, as in pollOnce, and it matters more here. A
+// push fans one division out to everyone following that MP, so a single blocked chat — 403,
+// the commonest failure there is — would otherwise silence that division for every other
+// subscriber in the same cycle.
+//
+// ⚠️ The items are marked as sent by CheckActivity while it BUILDS the replies, before this
+// function has sent anything. A send that fails therefore loses that division rather than
+// retrying it: harmless for a chat that has blocked the bot, a dropped notification for a
+// timeout. Logged as issue 20; the fix is to confirm sends back to the store, which is a shape
+// change best made when the store moves to Postgres.
 func pushOnce(b *bot.Bot, tg *bot.Telegram) error {
 	replies := b.CheckActivity()
 

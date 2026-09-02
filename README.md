@@ -8,9 +8,9 @@ written question, or speaks in the chamber. Written in **Go**.
 
 ## What it does
 
-- A user finds the bot on Telegram, taps **Start**, and picks an MP by postcode or name.
+- A user finds the bot on Telegram, taps **Start**, and picks an MP by name. (Postcode lookup is planned, not built.)
 - The bot stores which MP(s) that user follows.
-- A background loop polls UK Parliament every ~15 minutes and, when a followed MP has new
+- A background loop polls UK Parliament hourly and, when a followed MP has new
   activity, messages everyone following that MP.
 - The first time an MP is followed, the bot records their current activity **silently**,
   so a new follower isn't blasted with a backlog — only genuinely new items get pushed.
@@ -62,12 +62,16 @@ sees their chat).
 | Command | Description |
 | --- | --- |
 | `/start` | Opt in; bot records the chat |
-| `/find` | Find an MP by postcode or name |
+| `/find` | Find an MP by name |
+| `/follow` | Follow an MP by name |
+| `/unfollow` | Stop following an MP |
 | `/list` | See who you follow |
 | `/latest` | Show recent activity now |
-| `/privacy` | What we store and why (UK GDPR transparency) |
-| `/forgetme` | Delete all your data (and stop) |
 | `/help` | How the bot works |
+| `/privacy` | What we store and why (UK GDPR transparency) |
+| `/source` | Where the source code lives (AGPL) |
+| `/stop` | Stop the pushed messages |
+| `/forgetme` | Delete all your data (and stop) |
 
 ## Architecture & operations
 
@@ -112,11 +116,26 @@ The relayed Parliament data remains under the **Open Parliament Licence v3.0**
 Parliamentary information licensed under the Open Parliament Licence v3.0") in the bot's
 output/docs.
 
-Per the AGPL's own recommendation for network services, the bot should provide a way for
-users to get its source (e.g. a `/source` command or a link in `/help` pointing to this
-repo).
+Per the AGPL's own recommendation for network services, the bot provides a `/source`
+command pointing at this repo.
 
 ## Status
 
-Early. Go module initialised (`github.com/Rolyani/mp-telegram-bot`, Go 1.26). No
-application code yet — development will proceed test-first, in vertical slices.
+**Working, running locally against real Telegram, not yet deployed.** Built test-first in
+vertical slices; 84 tests, Go 1.26.
+
+Done:
+
+- All eleven commands answer, over real Telegram — confirmed on a phone.
+- MP lookup and Commons Votes come from the live Parliament APIs.
+- The bot pushes new divisions to followers on its own initiative, hourly.
+- A first follow records the MP's current activity silently, so nobody gets a backlog blast.
+- Storage is behind a `Store` interface, ready for a second implementation.
+
+Not done:
+
+- **Persistence.** State is in memory, so a restart loses every follow. PostgreSQL is next
+  and is what makes deployment possible at all.
+- **Deployment.** No Dockerfile, Deployment, or Flux manifests yet.
+- Written Questions and Hansard — of the three activity feeds, only Commons Votes is real.
+- Postcode lookup.
