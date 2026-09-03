@@ -170,3 +170,43 @@ func TestPostgresStore_aFollowSurvivesAReconnect(t *testing.T) {
 		t.Errorf("Follows(%d) = %+v, want %+v — a follow written by one connection must be readable by the next, or every Flux rollout empties every user's list", chatID, follows, want)
 	}
 }
+
+// Slice F4: following the same MP twice leaves one follow, not two.
+//
+// ⚠️ Exactly the bug AddChat already has the fix for, one table over. A user who forgets they
+// already follow someone, or taps an old /follow button again, would otherwise get every
+// division from that MP pushed to them TWICE — and the duplicate is invisible in the database
+// until it is a stream of doubled messages on someone's phone.
+//
+// ⚠️ No reconnect in this one. F2 and F3 needed a second store because they were asking whether
+// the data reached Postgres at all; that is now established, and this test asks a different
+// question — what the table does with a repeat — which one connection can answer. A test that
+// reconnects out of habit is a slower test that proves the same thing twice.
+func TestPostgresStore_followingTheSameMPTwice_isNotADuplicate(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	mp := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("first FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+	}
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("second FollowMP(%d, %+v) returned error: %v — a repeated /follow must be accepted, not rejected", chatID, mp, err)
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+
+	want := []bot.Member{mp}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v, want %+v — a doubled follow means every division from that MP is pushed to that chat twice", chatID, follows, want)
+	}
+}

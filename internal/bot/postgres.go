@@ -55,6 +55,13 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 		return nil, fmt.Errorf("create follows table: %w", err)
 	}
 
+	if _, err := pool.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS follows_chat_member
+		ON follows (chat_id, member_id)
+	`); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create follows index: %w", err)
+	}
+
 	return &PostgresStore{pool: pool}, nil
 }
 
@@ -74,7 +81,7 @@ func (s *PostgresStore) FollowMP(chatID int64, mp Member) error {
 	ctx := context.Background()
 
 	if _, err := s.pool.Exec(ctx, `INSERT INTO follows (chat_id, member_id, name)
-		VALUES ($1, $2, $3)`, chatID, mp.ID, mp.Name); err != nil {
+		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, chatID, mp.ID, mp.Name); err != nil {
 		return fmt.Errorf("insert into follows: %w", err)
 	}
 
