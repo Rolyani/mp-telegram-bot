@@ -2,6 +2,7 @@ package bot_test
 
 import (
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -121,5 +122,51 @@ func TestPostgresStore_addChatTwice_isNotAnError(t *testing.T) {
 	}
 	if seen != 1 {
 		t.Errorf("Chats() contains %d %d times, want exactly 1 — a duplicated chat would be pushed every division twice", chatID, seen)
+	}
+}
+
+// Slice F3 (session 4, Postgres): the same restart property as F2, now on the data a user
+// would actually miss. A chat ID is cheap to lose — Telegram hands it back the next time
+// they speak. A follow list is not: nothing outside this database knows that this chat
+// follows this MP, so if a pod restart drops it, the user has to rebuild it by hand and the
+// bot silently goes quiet in the meantime.
+//
+// ⚠️ Same shape as F2 and for the same reason: the SECOND store is the point. Reading back
+// through the store that wrote the follow would pass against a map held in the struct and
+// prove nothing about Postgres.
+//
+// ⚠️ Note that both fields are asserted, not just the ID. A follows table storing only
+// member_id would satisfy a looser test and then make /follows print a list of numbers —
+// the name is what the user reads, so the name has to make the round trip too.
+func TestPostgresStore_aFollowSurvivesAReconnect(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	mp := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+	}
+
+	// A new process, as far as the database is concerned.
+	reopened, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("second NewPostgresStore() returned error: %v", err)
+	}
+	defer reopened.Close()
+
+	follows, err := reopened.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+
+	want := []bot.Member{mp}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v, want %+v — a follow written by one connection must be readable by the next, or every Flux rollout empties every user's list", chatID, follows, want)
 	}
 }

@@ -46,6 +46,15 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 		return nil, fmt.Errorf("create chats table: %w", err)
 	}
 
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS follows (
+		chat_id BIGINT,
+		member_id INT,
+		name TEXT
+	)`); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create follows table: %w", err)
+	}
+
 	return &PostgresStore{pool: pool}, nil
 }
 
@@ -59,6 +68,17 @@ func (s *PostgresStore) AddChat(chatID int64) error {
 
 	return nil
 
+}
+
+func (s *PostgresStore) FollowMP(chatID int64, mp Member) error {
+	ctx := context.Background()
+
+	if _, err := s.pool.Exec(ctx, `INSERT INTO follows (chat_id, member_id, name)
+		VALUES ($1, $2, $3)`, chatID, mp.ID, mp.Name); err != nil {
+		return fmt.Errorf("insert into follows: %w", err)
+	}
+
+	return nil
 }
 
 // Chats returns every recorded chat ID.
@@ -90,6 +110,28 @@ func (s *PostgresStore) Chats() ([]int64, error) {
 	// mid-read", and the loop cannot tell those apart. rows.Err() is the only thing that can;
 	// without it a broken connection is indistinguishable from an empty subscriber list.
 	return chats, rows.Err()
+}
+
+func (s *PostgresStore) Follows(chatID int64) ([]Member, error) {
+	ctx := context.Background()
+
+	rows, err := s.pool.Query(ctx, `SELECT member_id, name FROM follows WHERE chat_id = $1`, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("select follows: %w", err)
+	}
+
+	defer rows.Close()
+
+	var follows []Member
+	for rows.Next() {
+		var mp Member
+		if err := rows.Scan(&mp.ID, &mp.Name); err != nil {
+			return nil, fmt.Errorf("scan follow: %w", err)
+		}
+		follows = append(follows, mp)
+	}
+
+	return follows, rows.Err()
 }
 
 // Close releases the pool's connections. The program calls it once, at shutdown; the tests call
