@@ -129,7 +129,7 @@ func (s *PostgresStore) Follows(chatID int64) ([]Member, error) {
 
 	defer rows.Close()
 
-	var follows []Member
+	follows := make([]Member, 0)
 	for rows.Next() {
 		var mp Member
 		if err := rows.Scan(&mp.ID, &mp.Name); err != nil {

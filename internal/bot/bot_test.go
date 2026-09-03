@@ -2802,3 +2802,31 @@ func TestCheckActivity_storeFails_reportsRatherThanPushingNothing(t *testing.T) 
 		t.Errorf("CheckActivity() returned %d replies from a broken store, want none: %+v", len(replies), replies)
 	}
 }
+
+// Slice F6: MemoryStore answers "follows nobody" the same way PostgresStore does.
+//
+// ⚠️ This is not a repeat of the Postgres test — it is the OTHER HALF of it. Store has two
+// implementations, and Bot holds the interface without knowing which one it was handed. F5 made
+// PostgresStore return an empty slice; MemoryStore still returns nil, because s.follows[chatID]
+// on a missing key gives the zero value and the zero value of a slice is nil. So the same call
+// on the same interface answers differently depending on which store the program was wired with,
+// which is the kind of difference that shows up in production and not in a test.
+//
+// ⚠️ An interface with two implementations owes its callers ONE set of promises. Whenever a
+// slice pins behaviour on one store, the same behaviour is owed by the other — otherwise the
+// interface is a lie about what a caller can rely on.
+func TestMemoryStore_followsForAChatThatFollowsNobody_isEmptyNotNil(t *testing.T) {
+	store := bot.NewMemoryStore()
+
+	follows, err := store.Follows(1)
+	if err != nil {
+		t.Fatalf("Follows(1) returned error: %v", err)
+	}
+
+	if follows == nil {
+		t.Errorf("Follows(1) = nil, want an empty slice — PostgresStore returns empty here, and Bot holds the Store interface without knowing which of the two it has")
+	}
+	if len(follows) != 0 {
+		t.Errorf("Follows(1) = %+v, want it empty — this chat has never followed anyone", follows)
+	}
+}

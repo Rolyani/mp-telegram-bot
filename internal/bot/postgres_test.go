@@ -210,3 +210,41 @@ func TestPostgresStore_followingTheSameMPTwice_isNotADuplicate(t *testing.T) {
 		t.Errorf("Follows(%d) = %+v, want %+v — a doubled follow means every division from that MP is pushed to that chat twice", chatID, follows, want)
 	}
 }
+
+// Slice F5: a chat that follows nobody gets an empty list, not a nil one.
+//
+// ⚠️ This is the decision we deliberately left open in F3, now being made on purpose. Both
+// answers work for anyone who only ranges or takes len — the difference shows up the moment
+// something compares, encodes, or checks for nil, and by then the choice was made years ago by
+// whoever typed the line.
+//
+// ⚠️ The reason for empty rather than nil is CONSISTENCY WITH Chats, six methods up, which
+// already returns make([]int64, 0). Two methods on one store answering "there is nothing here"
+// two different ways is a coin-flip every caller has to remember, and the one that gets it wrong
+// finds out at runtime.
+//
+// ⚠️ reflect.DeepEqual is doing real work here and slices.Equal could not: a nil []Member and an
+// empty []Member have the same length and the same (zero) elements, so an element-walking
+// comparison calls them equal and this test would pass against either. The strict comparison is
+// the only reason this is a test and not a comment.
+func TestPostgresStore_followsForAChatThatFollowsNobody_isEmptyNotNil(t *testing.T) {
+	dsn := testDSN(t)
+	// Never followed anyone, never even spoken to the bot.
+	chatID := uniqueChatID()
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+
+	want := []bot.Member{}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %#v, want %#v — an unknown chat follows nobody, and that must read the same way as Chats() reporting no chats", chatID, follows, want)
+	}
+}
