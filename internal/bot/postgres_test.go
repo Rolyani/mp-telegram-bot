@@ -248,3 +248,54 @@ func TestPostgresStore_followsForAChatThatFollowsNobody_isEmptyNotNil(t *testing
 		t.Errorf("Follows(%d) = %#v, want %#v — an unknown chat follows nobody, and that must read the same way as Chats() reporting no chats", chatID, follows, want)
 	}
 }
+
+// Slice F7: an item already sent to a chat is still known to have been sent after a restart.
+//
+// ⚠️ This is the one where forgetting is LOUD. Losing a chat ID costs a subscriber who comes
+// back on their next message; losing a follow costs a list the user can retype. Losing the sent
+// record costs every follower a re-run of every activity item the bot has ever pushed them, on
+// the first poll after the pod restarts — because CheckActivity asks WasSent before each push
+// and a fresh MemoryStore says no to all of it. That is the spam this table exists to prevent.
+//
+// ⚠️ Both assertions matter, and the second is what gives the first its meaning. A WasSent that
+// ignored its arguments and returned true would satisfy the marked case perfectly well; only
+// asking about an item that was never marked can tell a real lookup from a stub.
+func TestPostgresStore_aSentItemIsStillMarkedSentAfterAReconnect(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	const sentID = "division-1901"
+	const neverSentID = "division-1902"
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.MarkSent(chatID, sentID); err != nil {
+		t.Fatalf("MarkSent(%d, %q) returned error: %v", chatID, sentID, err)
+	}
+
+	// A new process, as far as the database is concerned.
+	reopened, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("second NewPostgresStore() returned error: %v", err)
+	}
+	defer reopened.Close()
+
+	sent, err := reopened.WasSent(chatID, sentID)
+	if err != nil {
+		t.Fatalf("WasSent(%d, %q) returned error: %v", chatID, sentID, err)
+	}
+	if !sent {
+		t.Errorf("WasSent(%d, %q) = false, want true — the item was marked sent before the restart, and saying no here pushes it to the user a second time", chatID, sentID)
+	}
+
+	unsent, err := reopened.WasSent(chatID, neverSentID)
+	if err != nil {
+		t.Fatalf("WasSent(%d, %q) returned error: %v", chatID, neverSentID, err)
+	}
+	if unsent {
+		t.Errorf("WasSent(%d, %q) = true, want false — nothing ever marked this item, and saying yes here silently drops an item the user should have seen", chatID, neverSentID)
+	}
+}

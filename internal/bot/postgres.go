@@ -62,6 +62,14 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 		return nil, fmt.Errorf("create follows index: %w", err)
 	}
 
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS sent (
+		chat_id BIGINT,
+		activity_id TEXT
+	)`); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create sent table: %w", err)
+	}
+
 	return &PostgresStore{pool: pool}, nil
 }
 
@@ -139,6 +147,32 @@ func (s *PostgresStore) Follows(chatID int64) ([]Member, error) {
 	}
 
 	return follows, rows.Err()
+}
+
+func (s *PostgresStore) MarkSent(chatID int64, activityID string) error {
+	ctx := context.Background()
+
+	if _, err := s.pool.Exec(ctx, `INSERT INTO sent (chat_id, activity_id)
+		VALUES ($1, $2) ON CONFLICT DO NOTHING`, chatID, activityID); err != nil {
+		return fmt.Errorf("insert into sent: %w", err)
+	}
+
+	return nil
+}
+
+func (s *PostgresStore) WasSent(chatID int64, activityID string) (bool, error) {
+	ctx := context.Background()
+
+	var exists bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM sent WHERE chat_id = $1 AND activity_id = $2
+	)`, chatID, activityID).Scan(&exists)
+
+	if err != nil {
+		return false, fmt.Errorf("was sent scan: %w", err)
+	}
+
+	return exists, nil
 }
 
 // Close releases the pool's connections. The program calls it once, at shutdown; the tests call
