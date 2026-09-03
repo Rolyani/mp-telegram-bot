@@ -192,9 +192,18 @@ func (s *MemoryStore) UnfollowMP(chatID int64, id int) (bool, error) {
 	return removed, nil
 }
 
-// Follows returns the MPs that chatID follows.
+// Follows returns the MPs that chatID follows, or an empty slice if it follows none.
+//
+// ⚠️ Empty, never nil. Indexing a map with an absent key gives the zero value, and the zero
+// value of a slice is nil — so the check below is the only thing stopping a chat nobody has
+// seen from answering differently to PostgresStore, which returns empty. Bot holds the Store
+// interface and cannot tell the two apart, so both owe the same answer.
 func (s *MemoryStore) Follows(chatID int64) ([]Member, error) {
-	return s.follows[chatID], nil
+	follows := s.follows[chatID]
+	if follows == nil {
+		return []Member{}, nil
+	}
+	return follows, nil
 }
 
 // Chats returns the recorded chat IDs
