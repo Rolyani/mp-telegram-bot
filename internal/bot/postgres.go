@@ -225,6 +225,35 @@ func (s *PostgresStore) RemoveChat(chatID int64) error {
 	return nil
 }
 
+// UnfollowMP removes one MP from one chat's follow list and reports whether it was there to
+// remove. It takes a member ID rather than a name for the reason FollowMP takes an already
+// resolved Member: working out WHICH member a typed name meant is the caller's job, because the
+// caller is the only layer with a user it can ask.
+//
+// ⚠️ Both columns in the WHERE. chat_id alone would unfollow that MP for every chat that
+// follows them — a one-word omission with no visible symptom until someone else stops receiving
+// their notifications.
+//
+// ⚠️ This is the one method that READS the rows-affected count, exactly where RemoveChat
+// deliberately ignores it. Matching no rows is not an error in either — a DELETE that finds
+// nothing succeeds — but here the caller needs telling, because /unfollow answers differently
+// depending on whether anything was actually removed. That is what the bool is for, and why
+// "not followed" returns (false, nil) rather than an error.
+func (s *PostgresStore) UnfollowMP(chatID int64, id int) (bool, error) {
+	ctx := context.Background()
+
+	tag, err := s.pool.Exec(ctx, `DELETE FROM follows WHERE chat_id = $1 AND member_id = $2`, chatID, id)
+	if err != nil {
+		return false, fmt.Errorf("delete follow mp: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // Close releases the pool's connections. The program calls it once, at shutdown; the tests call
 // it on every store they open.
 func (s *PostgresStore) Close() {

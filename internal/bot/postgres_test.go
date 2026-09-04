@@ -509,3 +509,62 @@ func TestPostgresStore_removeChat_unsubscribesButKeepsFollows(t *testing.T) {
 		t.Errorf("Follows(%d) = %+v after RemoveChat, want %+v — RemoveChat unsubscribes, it does not erase; erasing everything is ForgetChat's job", chatID, follows, want)
 	}
 }
+
+// Slice F13: UnfollowMP removes one MP, leaves the others, and reports whether it removed one.
+//
+// ⚠️ The two calls are one behaviour, not two. The bool means "was it there to remove", and a
+// test of only the first call passes against `return true, nil` — which then tells a user who
+// mistyped a name that they have been unfollowed from someone they never followed. Asking the
+// same question twice is what makes the answer mean anything.
+//
+// ⚠️ This is the one place the rows-affected count in the command tag SHOULD be read, exactly
+// where RemoveChat in F12 deliberately ignores it. A DELETE that matches nothing is not an
+// error in either method; the difference is that here the caller needs to be told.
+//
+// ⚠️ Exactly one follow is left standing, deliberately. Follows has no ORDER BY, so row order is
+// not guaranteed and a two-element comparison could fail on an ordering the store never promised.
+// A single remaining member is order-free.
+func TestPostgresStore_unfollowMP_removesOneAndReportsWhetherItWasThere(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	gone := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+	kept := bot.Member{ID: 4212, Name: "Cat Smith"}
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	for _, mp := range []bot.Member{gone, kept} {
+		if err := store.FollowMP(chatID, mp); err != nil {
+			t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+		}
+	}
+
+	removed, err := store.UnfollowMP(chatID, gone.ID)
+	if err != nil {
+		t.Fatalf("UnfollowMP(%d, %d) returned error: %v", chatID, gone.ID, err)
+	}
+	if !removed {
+		t.Errorf("UnfollowMP(%d, %d) = false, want true — this chat was following that MP, and a false here tells the user nothing happened while the row is deleted", chatID, gone.ID)
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+	want := []bot.Member{kept}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v after unfollowing %d, want %+v — unfollowing one MP must leave the others alone", chatID, follows, gone.ID, want)
+	}
+
+	// The same call again, now that the MP is gone: nothing to remove, and it must say so.
+	removed, err = store.UnfollowMP(chatID, gone.ID)
+	if err != nil {
+		t.Fatalf("second UnfollowMP(%d, %d) returned error: %v — matching no rows is not a failure", chatID, gone.ID, err)
+	}
+	if removed {
+		t.Errorf("second UnfollowMP(%d, %d) = true, want false — nothing was there to remove, and saying yes confirms an unfollow that never happened", chatID, gone.ID)
+	}
+}
