@@ -162,10 +162,27 @@ func (s *MemoryStore) HasChat(chatID int64) bool {
 	return s.chats[chatID]
 }
 
-// FollowMP records that chatID follows mp. The MP arrives already resolved: the store
-// keeps identities, and deciding WHICH member a typed name meant belongs to the caller,
-// which is the only layer with a user to ask.
+// FollowMP records that chatID follows mp, and does nothing if that MP is already followed.
+// The MP arrives already resolved: the store keeps identities, and deciding WHICH member a
+// typed name meant belongs to the caller, which is the only layer with a user to ask.
+//
+// ⚠️ A repeat is ACCEPTED and ignored, never rejected. Following someone twice is an ordinary
+// thing for a user to do — forgetting, or tapping an old button — so returning an error here
+// would turn a harmless action into a visible failure.
+//
+// ⚠️ Matched on ID, not on the whole Member. The two differ the moment a name changes: a chat
+// holding {4514, "Keir Starmer"} that follows {4514, "Sir Keir Starmer"} gets one follow under
+// an ID check and two under struct equality. PostgresStore dedups on (chat_id, member_id) via
+// the follows_chat_member index, so the ID check is the one that keeps the two stores agreeing.
+//
+// A linear scan, not a lookup map: s.follows is a slice per chat because Follows and UnfollowMP
+// both need order, and a follow list is a handful of MPs.
 func (s *MemoryStore) FollowMP(chatID int64, mp Member) error {
+	for _, f := range s.follows[chatID] {
+		if f.ID == mp.ID {
+			return nil
+		}
+	}
 	s.follows[chatID] = append(s.follows[chatID], mp)
 	return nil
 }
@@ -269,11 +286,18 @@ func (b *Bot) CheckActivity() ([]Reply, error) {
 	return replies, nil
 }
 
-// ForgetChat removes the chat's subscription and its entire follow list. It does not
-// yet clear the per-chat already-sent set (s.seen) — that's a separate behavior.
+// ForgetChat erases everything the store holds for a chat: its subscription, its follow list,
+// and its already-sent set. This is a GDPR erasure, not a tidy-up — /forgetme answers "Your
+// follows and account have been removed.", and a record left behind in any of the three makes
+// that reply a lie.
+//
+// ⚠️ delete, not s.seen[chatID] = nil. Both make WasSent answer false, since indexing a nil
+// map is legal and gives the zero value. Only delete removes the outer key, so the erased chat
+// stops being visible to anything that ranges over s.seen, and the memory is actually released.
 func (s *MemoryStore) ForgetChat(chatID int64) error {
 	delete(s.follows, chatID)
 	delete(s.chats, chatID)
+	delete(s.seen, chatID)
 	return nil
 }
 
