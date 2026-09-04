@@ -2,7 +2,9 @@
 // clocks: it polls for messages and answers them, and it pushes MPs' new votes to the people
 // following them.
 //
-// It needs TELEGRAM_TOKEN in the environment and reads nothing else. Run it with
+// It needs TELEGRAM_TOKEN and DATABASE_URL in the environment and reads nothing else. Neither
+// has a default and neither is optional: the bot exits naming whichever is missing rather than
+// starting in a state that looks healthy. Run it with
 //
 //	set -a; source .env; set +a
 //	go run ./cmd/mp-bot
@@ -39,7 +41,11 @@ const (
 // main wires the program up and owns the loop, and is deliberately the one function no test
 // covers. It takes no arguments and returns nothing, so there is no seam to push a fixture
 // through — which is exactly why everything with a decision in it lives in telegramFromEnv
-// and pollOnce instead, both of which are tested.
+// storeFromEnv and pollOnce instead, all of which are tested.
+//
+// ⚠️ There are now TWO exits before the loop, and the store is the one that matters. Starting
+// without a database would mean accepting follows into memory and losing them on the next
+// restart — see storeFromEnv.
 //
 // ⚠️ Note the asymmetry between the two failures, which is the only judgement here. A missing
 // token EXITS: it cannot fix itself, and a bot that runs on unauthenticated 401s looks like a
@@ -53,7 +59,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	b := bot.New(bot.NewMemoryStore(), bot.NewResolver("https://members-api.parliament.uk"), bot.NewVotesSource("https://commonsvotes-api.parliament.uk"))
+	store, err := storeFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	b := bot.New(store, bot.NewResolver("https://members-api.parliament.uk"), bot.NewVotesSource("https://commonsvotes-api.parliament.uk"))
 
 	polls := time.NewTicker(pollEvery)
 	pushes := time.NewTicker(pushEvery)
@@ -157,4 +169,31 @@ func telegramFromEnv() (*bot.Telegram, error) {
 	} else {
 		return bot.NewTelegram("https://api.telegram.org", token), nil
 	}
+}
+
+// storeFromEnv opens the Postgres store named by DATABASE_URL, or refuses.
+//
+// ⚠️ There is deliberately NO fallback to MemoryStore. It is the tempting branch to write — no
+// DSN, so run in memory — and it is the worst option available: the bot starts, answers
+// commands, accepts follows, looks entirely healthy, and loses every follow for every user on
+// the first restart. In a cluster where a restart is routine (every Flux rollout, every node
+// reboot) that is not a degraded mode, it is silent data loss wearing a green tick. Refusing by
+// name costs one line of output and loses nothing.
+//
+// ⚠️ Two failures, not one. An unset variable is caught here; an unreachable or misconfigured
+// database is caught by NewPostgresStore, which pings before returning. Both have to happen
+// before main builds anything, which is why this is a separate function rather than a line
+// inside main — a function can be tested, and main cannot.
+func storeFromEnv() (*bot.PostgresStore, error) {
+	db := os.Getenv("DATABASE_URL")
+	if db == "" {
+		return nil, errors.New("DATABASE_URL is not set")
+	}
+	store, err := bot.NewPostgresStore(db)
+	if err != nil {
+		return nil, fmt.Errorf("connect to postgres: %w", err)
+	}
+
+	return store, nil
+
 }
