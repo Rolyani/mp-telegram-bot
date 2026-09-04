@@ -1,10 +1,13 @@
 package bot_test
 
 import (
+	"context"
 	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
@@ -297,5 +300,78 @@ func TestPostgresStore_aSentItemIsStillMarkedSentAfterAReconnect(t *testing.T) {
 	}
 	if unsent {
 		t.Errorf("WasSent(%d, %q) = true, want false — nothing ever marked this item, and saying yes here silently drops an item the user should have seen", chatID, neverSentID)
+	}
+}
+
+// countSentRows counts the rows in the sent table for one (chat, activity) pair.
+//
+// ⚠️ This helper KNOWS THE SCHEMA, and it is the only thing in this file that does. That is a
+// deliberate exception to the rule uniqueChatID sets out, not a lapse — and it is worth naming
+// why, because the next person to touch the store will have to decide whether to keep it.
+//
+// The property this slice is about is invisible through the Store interface. WasSent answers
+// true whether there is one matching row or fifty, so a test written only against MarkSent and
+// WasSent passes today and would go on passing however badly the table duplicated. There is no
+// behavioural vantage point; either the test reaches into the schema or the property stays
+// unproven. It reaches in.
+//
+// ⚠️ Its own connection, not the store's pool. Counting through the store would mean adding a
+// method to Store that only a test wants, and every future implementation would then owe an
+// answer to a question the bot never asks.
+func countSentRows(t *testing.T, dsn string, chatID int64, activityID string) int {
+	t.Helper()
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("test connection to %q failed: %v", dsn, err)
+	}
+	defer conn.Close(ctx)
+
+	var n int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM sent
+		WHERE chat_id = $1 AND activity_id = $2`, chatID, activityID).Scan(&n); err != nil {
+		t.Fatalf("counting sent rows for (%d, %q) failed: %v", chatID, activityID, err)
+	}
+	return n
+}
+
+// Slice F8: marking the same item sent twice leaves one row, not two.
+//
+// ⚠️ MarkSent already ends in ON CONFLICT DO NOTHING, so this looks handled and is not. That
+// clause needs a unique constraint to conflict AGAINST; the sent table has none, so there is
+// nothing for the insert to collide with and the second row goes in silently. It does not
+// error, which is what makes it worth a test — the code reads as if the problem were solved.
+//
+// ⚠️ The path that hits it is live today. /follow writes a baseline by marking every existing
+// activity for that MP as sent (bot.go:421), and F4 deliberately made a repeated /follow legal
+// rather than an error. So a user who follows the same MP a second time re-runs that entire
+// loop and writes a duplicate of every item, every time, on a table nothing ever deletes from.
+//
+// ⚠️ Note what is NOT asserted: that an index exists, or what it is called. One row per
+// (chat, activity) is the property; a unique index is only the cheapest way to get it, and a
+// primary key or a check-then-insert would satisfy this test exactly as well. A test naming the
+// mechanism would have to be rewritten the day the mechanism changed, and would have been
+// asserting the implementation's own opinion of itself in the meantime.
+func TestPostgresStore_markingTheSameItemSentTwice_storesOneRow(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	const activityID = "division-1903"
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.MarkSent(chatID, activityID); err != nil {
+		t.Fatalf("first MarkSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+	if err := store.MarkSent(chatID, activityID); err != nil {
+		t.Fatalf("second MarkSent(%d, %q) returned error: %v — re-marking an item is what a repeated /follow does, and it must be accepted, not rejected", chatID, activityID, err)
+	}
+
+	if n := countSentRows(t, dsn, chatID, activityID); n != 1 {
+		t.Errorf("sent holds %d rows for (%d, %q), want 1 — every repeat of /follow duplicates the whole baseline into a table nothing ever prunes", n, chatID, activityID)
 	}
 }

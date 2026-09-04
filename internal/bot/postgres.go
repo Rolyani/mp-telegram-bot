@@ -70,6 +70,13 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 		return nil, fmt.Errorf("create sent table: %w", err)
 	}
 
+	if _, err := pool.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS sent_chat_activity
+		ON sent (chat_id, activity_id)
+	`); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create sent index: %w", err)
+	}
+
 	return &PostgresStore{pool: pool}, nil
 }
 
