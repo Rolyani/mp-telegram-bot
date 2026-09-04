@@ -182,6 +182,27 @@ func (s *PostgresStore) WasSent(chatID int64, activityID string) (bool, error) {
 	return exists, nil
 }
 
+func (s *PostgresStore) ForgetChat(chatID int64) error {
+	ctx := context.Background()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin forget chat: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM chats WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete chats: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM follows WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete follows: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM sent WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete sent: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
 // Close releases the pool's connections. The program calls it once, at shutdown; the tests call
 // it on every store they open.
 func (s *PostgresStore) Close() {

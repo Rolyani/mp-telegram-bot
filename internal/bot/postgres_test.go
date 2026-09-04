@@ -375,3 +375,77 @@ func TestPostgresStore_markingTheSameItemSentTwice_storesOneRow(t *testing.T) {
 		t.Errorf("sent holds %d rows for (%d, %q), want 1 — every repeat of /follow duplicates the whole baseline into a table nothing ever prunes", n, chatID, activityID)
 	}
 }
+
+// Slice F9: ForgetChat erases the chat, its follows, and its sent record — everything.
+//
+// ⚠️ This is a GDPR erasure, not a tidy-up, which changes what counts as a pass. /forgetme
+// answers "Your follows and account have been removed." and HandleUpdate's own comment calls a
+// false success here the worst version of this class of bug. A row left behind in ANY of the
+// three tables makes that reply a lie, so the test asks all three rather than the obvious two.
+//
+// ⚠️ sent is deliberately included even though MemoryStore.ForgetChat does not clear its seen
+// map (ISSUES #10). That gap is a bug being carried, not a contract being matched — and the
+// rows are (chat_id, activity_id) pairs tied to a person, which is exactly what the erasure is
+// meant to remove. Writing the new store to reproduce a known defect for symmetry's sake would
+// mean shipping it twice. MemoryStore gets brought up to this in the next slice.
+//
+// ⚠️ No reconnect, for the reason F4 gives: F2 and F3 established that this store really does
+// talk to Postgres, and PostgresStore holds no cache a stale read could come from. The question
+// here is whether the DELETEs ran, which one connection can answer.
+//
+// ⚠️ All three assertions are t.Errorf, not t.Fatalf. A ForgetChat that clears two tables and
+// forgets the third is the single most likely way for this to be wrong, and stopping at the
+// first failure would hide which of the three actually survived.
+func TestPostgresStore_forgetChat_leavesNothingBehind(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	mp := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+	const activityID = "division-1904"
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	// A chat with something in all three tables — subscribed, following, already pushed to.
+	if err := store.AddChat(chatID); err != nil {
+		t.Fatalf("AddChat(%d) returned error: %v", chatID, err)
+	}
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+	}
+	if err := store.MarkSent(chatID, activityID); err != nil {
+		t.Fatalf("MarkSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+
+	if err := store.ForgetChat(chatID); err != nil {
+		t.Fatalf("ForgetChat(%d) returned error: %v", chatID, err)
+	}
+
+	chats, err := store.Chats()
+	if err != nil {
+		t.Fatalf("Chats() returned error: %v", err)
+	}
+	for _, id := range chats {
+		if id == chatID {
+			t.Errorf("Chats() still contains %d after ForgetChat — the chat would go on being polled and pushed to", chatID)
+		}
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+	if len(follows) != 0 {
+		t.Errorf("Follows(%d) = %+v after ForgetChat, want none — these are the follows the user was told had been removed", chatID, follows)
+	}
+
+	sent, err := store.WasSent(chatID, activityID)
+	if err != nil {
+		t.Fatalf("WasSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+	if sent {
+		t.Errorf("WasSent(%d, %q) = true after ForgetChat, want false — a record of what this person was sent survived an erasure that reported success", chatID, activityID)
+	}
+}
