@@ -14,6 +14,8 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+var _ Store = (*PostgresStore)(nil)
+
 // NewPostgresStore connects to the database named by dsn and returns a store ready to use.
 //
 // ⚠️ A POOL, not a connection. This process runs for weeks and the database WILL restart
@@ -68,6 +70,13 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 	)`); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("create sent table: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS sent_chat_activity
+		ON sent (chat_id, activity_id)
+	`); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("create sent index: %w", err)
 	}
 
 	return &PostgresStore{pool: pool}, nil
@@ -173,6 +182,78 @@ func (s *PostgresStore) WasSent(chatID int64, activityID string) (bool, error) {
 	}
 
 	return exists, nil
+}
+
+func (s *PostgresStore) ForgetChat(chatID int64) error {
+	ctx := context.Background()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin forget chat: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM chats WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete chats: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM follows WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete follows: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM sent WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete sent: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// RemoveChat unsubscribes a chat, leaving its follows and its sent-items record in place. It is
+// what /stop calls; erasing everything is ForgetChat's job, and the difference between the two
+// is the whole reason both exist.
+//
+// ⚠️ One statement, so no transaction. ForgetChat needs one because a mid-way failure there
+// could leave the chat gone and the follows behind, having told the user everything was removed.
+// A single Exec is already atomic and a transaction around it would buy nothing.
+//
+// ⚠️ Deleting a row that is not there is not an error. A /stop from a chat that never sent
+// /start matches nothing, affects zero rows and succeeds — which is why the rows-affected count
+// in the returned tag is deliberately not checked. Treating zero as a failure would report an
+// error to a user whose request was already satisfied.
+func (s *PostgresStore) RemoveChat(chatID int64) error {
+	ctx := context.Background()
+
+	if _, err := s.pool.Exec(ctx, `DELETE FROM chats WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete chat: %w", err)
+	}
+
+	return nil
+}
+
+// UnfollowMP removes one MP from one chat's follow list and reports whether it was there to
+// remove. It takes a member ID rather than a name for the reason FollowMP takes an already
+// resolved Member: working out WHICH member a typed name meant is the caller's job, because the
+// caller is the only layer with a user it can ask.
+//
+// ⚠️ Both columns in the WHERE. chat_id alone would unfollow that MP for every chat that
+// follows them — a one-word omission with no visible symptom until someone else stops receiving
+// their notifications.
+//
+// ⚠️ This is the one method that READS the rows-affected count, exactly where RemoveChat
+// deliberately ignores it. Matching no rows is not an error in either — a DELETE that finds
+// nothing succeeds — but here the caller needs telling, because /unfollow answers differently
+// depending on whether anything was actually removed. That is what the bool is for, and why
+// "not followed" returns (false, nil) rather than an error.
+func (s *PostgresStore) UnfollowMP(chatID int64, id int) (bool, error) {
+	ctx := context.Background()
+
+	tag, err := s.pool.Exec(ctx, `DELETE FROM follows WHERE chat_id = $1 AND member_id = $2`, chatID, id)
+	if err != nil {
+		return false, fmt.Errorf("delete follow mp: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	return true, nil
 }
 
 // Close releases the pool's connections. The program calls it once, at shutdown; the tests call

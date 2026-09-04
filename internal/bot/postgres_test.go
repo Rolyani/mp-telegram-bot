@@ -1,10 +1,13 @@
 package bot_test
 
 import (
+	"context"
 	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Rolyani/mp-telegram-bot/internal/bot"
 )
@@ -297,5 +300,271 @@ func TestPostgresStore_aSentItemIsStillMarkedSentAfterAReconnect(t *testing.T) {
 	}
 	if unsent {
 		t.Errorf("WasSent(%d, %q) = true, want false — nothing ever marked this item, and saying yes here silently drops an item the user should have seen", chatID, neverSentID)
+	}
+}
+
+// countSentRows counts the rows in the sent table for one (chat, activity) pair.
+//
+// ⚠️ This helper KNOWS THE SCHEMA, and it is the only thing in this file that does. That is a
+// deliberate exception to the rule uniqueChatID sets out, not a lapse — and it is worth naming
+// why, because the next person to touch the store will have to decide whether to keep it.
+//
+// The property this slice is about is invisible through the Store interface. WasSent answers
+// true whether there is one matching row or fifty, so a test written only against MarkSent and
+// WasSent passes today and would go on passing however badly the table duplicated. There is no
+// behavioural vantage point; either the test reaches into the schema or the property stays
+// unproven. It reaches in.
+//
+// ⚠️ Its own connection, not the store's pool. Counting through the store would mean adding a
+// method to Store that only a test wants, and every future implementation would then owe an
+// answer to a question the bot never asks.
+func countSentRows(t *testing.T, dsn string, chatID int64, activityID string) int {
+	t.Helper()
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("test connection to %q failed: %v", dsn, err)
+	}
+	defer conn.Close(ctx)
+
+	var n int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM sent
+		WHERE chat_id = $1 AND activity_id = $2`, chatID, activityID).Scan(&n); err != nil {
+		t.Fatalf("counting sent rows for (%d, %q) failed: %v", chatID, activityID, err)
+	}
+	return n
+}
+
+// Slice F8: marking the same item sent twice leaves one row, not two.
+//
+// ⚠️ MarkSent already ends in ON CONFLICT DO NOTHING, so this looks handled and is not. That
+// clause needs a unique constraint to conflict AGAINST; the sent table has none, so there is
+// nothing for the insert to collide with and the second row goes in silently. It does not
+// error, which is what makes it worth a test — the code reads as if the problem were solved.
+//
+// ⚠️ The path that hits it is live today. /follow writes a baseline by marking every existing
+// activity for that MP as sent (bot.go:421), and F4 deliberately made a repeated /follow legal
+// rather than an error. So a user who follows the same MP a second time re-runs that entire
+// loop and writes a duplicate of every item, every time, on a table nothing ever deletes from.
+//
+// ⚠️ Note what is NOT asserted: that an index exists, or what it is called. One row per
+// (chat, activity) is the property; a unique index is only the cheapest way to get it, and a
+// primary key or a check-then-insert would satisfy this test exactly as well. A test naming the
+// mechanism would have to be rewritten the day the mechanism changed, and would have been
+// asserting the implementation's own opinion of itself in the meantime.
+func TestPostgresStore_markingTheSameItemSentTwice_storesOneRow(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	const activityID = "division-1903"
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.MarkSent(chatID, activityID); err != nil {
+		t.Fatalf("first MarkSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+	if err := store.MarkSent(chatID, activityID); err != nil {
+		t.Fatalf("second MarkSent(%d, %q) returned error: %v — re-marking an item is what a repeated /follow does, and it must be accepted, not rejected", chatID, activityID, err)
+	}
+
+	if n := countSentRows(t, dsn, chatID, activityID); n != 1 {
+		t.Errorf("sent holds %d rows for (%d, %q), want 1 — every repeat of /follow duplicates the whole baseline into a table nothing ever prunes", n, chatID, activityID)
+	}
+}
+
+// Slice F9: ForgetChat erases the chat, its follows, and its sent record — everything.
+//
+// ⚠️ This is a GDPR erasure, not a tidy-up, which changes what counts as a pass. /forgetme
+// answers "Your follows and account have been removed." and HandleUpdate's own comment calls a
+// false success here the worst version of this class of bug. A row left behind in ANY of the
+// three tables makes that reply a lie, so the test asks all three rather than the obvious two.
+//
+// ⚠️ sent is deliberately included even though MemoryStore.ForgetChat does not clear its seen
+// map (ISSUES #10). That gap is a bug being carried, not a contract being matched — and the
+// rows are (chat_id, activity_id) pairs tied to a person, which is exactly what the erasure is
+// meant to remove. Writing the new store to reproduce a known defect for symmetry's sake would
+// mean shipping it twice. MemoryStore gets brought up to this in the next slice.
+//
+// ⚠️ No reconnect, for the reason F4 gives: F2 and F3 established that this store really does
+// talk to Postgres, and PostgresStore holds no cache a stale read could come from. The question
+// here is whether the DELETEs ran, which one connection can answer.
+//
+// ⚠️ All three assertions are t.Errorf, not t.Fatalf. A ForgetChat that clears two tables and
+// forgets the third is the single most likely way for this to be wrong, and stopping at the
+// first failure would hide which of the three actually survived.
+func TestPostgresStore_forgetChat_leavesNothingBehind(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	mp := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+	const activityID = "division-1904"
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	// A chat with something in all three tables — subscribed, following, already pushed to.
+	if err := store.AddChat(chatID); err != nil {
+		t.Fatalf("AddChat(%d) returned error: %v", chatID, err)
+	}
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+	}
+	if err := store.MarkSent(chatID, activityID); err != nil {
+		t.Fatalf("MarkSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+
+	if err := store.ForgetChat(chatID); err != nil {
+		t.Fatalf("ForgetChat(%d) returned error: %v", chatID, err)
+	}
+
+	chats, err := store.Chats()
+	if err != nil {
+		t.Fatalf("Chats() returned error: %v", err)
+	}
+	for _, id := range chats {
+		if id == chatID {
+			t.Errorf("Chats() still contains %d after ForgetChat — the chat would go on being polled and pushed to", chatID)
+		}
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+	if len(follows) != 0 {
+		t.Errorf("Follows(%d) = %+v after ForgetChat, want none — these are the follows the user was told had been removed", chatID, follows)
+	}
+
+	sent, err := store.WasSent(chatID, activityID)
+	if err != nil {
+		t.Fatalf("WasSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+	if sent {
+		t.Errorf("WasSent(%d, %q) = true after ForgetChat, want false — a record of what this person was sent survived an erasure that reported success", chatID, activityID)
+	}
+}
+
+// Slice F12: RemoveChat unsubscribes a chat and leaves its follows alone.
+//
+// ⚠️ The second assertion is the one with the content. Deleting the chat row is the easy half
+// and ForgetChat already does it; what makes RemoveChat a DIFFERENT METHOD rather than a copy is
+// that it stops there. Without a follows assertion this test passes against a RemoveChat that is
+// ForgetChat under another name, and the store would quietly answer /stop and /forgetme
+// identically.
+//
+// ⚠️ This mirrors MemoryStore.RemoveChat, which deletes from s.chats only. It does NOT settle
+// issue 14 — /stop replies "Your details have been removed." while keeping the follow list, and
+// whether that reply or that behaviour is the thing to change is still open. If /stop later
+// becomes "leave and forget me", both stores change together and this test changes with them.
+// What is being pinned here is that the two implementations agree TODAY, which is the property
+// F6, F10 and F11 each had to be a slice to restore.
+//
+// ⚠️ No reconnect, for the reason F4 and F9 give: F2 and F3 established that this store really
+// reaches Postgres, and there is no cache a stale read could come from. The question here is
+// whether the DELETE ran and stopped at one table, which one connection can answer.
+func TestPostgresStore_removeChat_unsubscribesButKeepsFollows(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	mp := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.AddChat(chatID); err != nil {
+		t.Fatalf("AddChat(%d) returned error: %v", chatID, err)
+	}
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+	}
+
+	if err := store.RemoveChat(chatID); err != nil {
+		t.Fatalf("RemoveChat(%d) returned error: %v", chatID, err)
+	}
+
+	chats, err := store.Chats()
+	if err != nil {
+		t.Fatalf("Chats() returned error: %v", err)
+	}
+	for _, id := range chats {
+		if id == chatID {
+			t.Errorf("Chats() still contains %d after RemoveChat — the chat would go on being polled and pushed to after asking to stop", chatID)
+		}
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+	want := []bot.Member{mp}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v after RemoveChat, want %+v — RemoveChat unsubscribes, it does not erase; erasing everything is ForgetChat's job", chatID, follows, want)
+	}
+}
+
+// Slice F13: UnfollowMP removes one MP, leaves the others, and reports whether it removed one.
+//
+// ⚠️ The two calls are one behaviour, not two. The bool means "was it there to remove", and a
+// test of only the first call passes against `return true, nil` — which then tells a user who
+// mistyped a name that they have been unfollowed from someone they never followed. Asking the
+// same question twice is what makes the answer mean anything.
+//
+// ⚠️ This is the one place the rows-affected count in the command tag SHOULD be read, exactly
+// where RemoveChat in F12 deliberately ignores it. A DELETE that matches nothing is not an
+// error in either method; the difference is that here the caller needs to be told.
+//
+// ⚠️ Exactly one follow is left standing, deliberately. Follows has no ORDER BY, so row order is
+// not guaranteed and a two-element comparison could fail on an ordering the store never promised.
+// A single remaining member is order-free.
+func TestPostgresStore_unfollowMP_removesOneAndReportsWhetherItWasThere(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	gone := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+	kept := bot.Member{ID: 4212, Name: "Cat Smith"}
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	for _, mp := range []bot.Member{gone, kept} {
+		if err := store.FollowMP(chatID, mp); err != nil {
+			t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+		}
+	}
+
+	removed, err := store.UnfollowMP(chatID, gone.ID)
+	if err != nil {
+		t.Fatalf("UnfollowMP(%d, %d) returned error: %v", chatID, gone.ID, err)
+	}
+	if !removed {
+		t.Errorf("UnfollowMP(%d, %d) = false, want true — this chat was following that MP, and a false here tells the user nothing happened while the row is deleted", chatID, gone.ID)
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+	want := []bot.Member{kept}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v after unfollowing %d, want %+v — unfollowing one MP must leave the others alone", chatID, follows, gone.ID, want)
+	}
+
+	// The same call again, now that the MP is gone: nothing to remove, and it must say so.
+	removed, err = store.UnfollowMP(chatID, gone.ID)
+	if err != nil {
+		t.Fatalf("second UnfollowMP(%d, %d) returned error: %v — matching no rows is not a failure", chatID, gone.ID, err)
+	}
+	if removed {
+		t.Errorf("second UnfollowMP(%d, %d) = true, want false — nothing was there to remove, and saying yes confirms an unfollow that never happened", chatID, gone.ID)
 	}
 }

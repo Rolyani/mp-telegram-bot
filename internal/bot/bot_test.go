@@ -2830,3 +2830,95 @@ func TestMemoryStore_followsForAChatThatFollowsNobody_isEmptyNotNil(t *testing.T
 		t.Errorf("Follows(1) = %+v, want it empty — this chat has never followed anyone", follows)
 	}
 }
+
+// Slice F10: MemoryStore.ForgetChat erases the sent-items record too, as PostgresStore does.
+//
+// ⚠️ This is the same shape as F6 — the other half of a slice already proved on one store —
+// but it matters more, because the divergence runs the wrong way round. cmd/mp-bot/main.go
+// wires NewMemoryStore, so the store WITHOUT the fix is the one every real /forgetme reaches.
+// F9 gave PostgresStore a transaction over chats, follows and sent; until this is green the
+// interface promises an erasure that only one of its two implementations performs.
+//
+// ⚠️ Nothing here needs a database, which is the point: the gap is in a map, and the whole
+// test is MarkSent, ForgetChat, WasSent. There is no reconnect and no DSN, so unlike the
+// Postgres half this cannot skip and report a false ok.
+//
+// ⚠️ WasSent is asked about an item the chat WAS sent. Asking about an unsent one would pass
+// against today's code and prove nothing — the assertion only bites because the true answer
+// before ForgetChat is true.
+func TestMemoryStore_forgetChat_clearsTheSentItemsRecord(t *testing.T) {
+	store := bot.NewMemoryStore()
+	const chatID = int64(42)
+	const activityID = "division-1904"
+
+	if err := store.AddChat(chatID); err != nil {
+		t.Fatalf("AddChat(%d) returned error: %v", chatID, err)
+	}
+	if err := store.MarkSent(chatID, activityID); err != nil {
+		t.Fatalf("MarkSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+
+	// Guard: the item really is on record, so a false below means ForgetChat cleared it
+	// rather than that it was never there.
+	sent, err := store.WasSent(chatID, activityID)
+	if err != nil {
+		t.Fatalf("WasSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+	if !sent {
+		t.Fatalf("WasSent(%d, %q) = false before ForgetChat, want true — MarkSent did not record the item, so the rest of this test would pass for the wrong reason", chatID, activityID)
+	}
+
+	if err := store.ForgetChat(chatID); err != nil {
+		t.Fatalf("ForgetChat(%d) returned error: %v", chatID, err)
+	}
+
+	sent, err = store.WasSent(chatID, activityID)
+	if err != nil {
+		t.Fatalf("WasSent(%d, %q) returned error: %v", chatID, activityID, err)
+	}
+	if sent {
+		t.Errorf("WasSent(%d, %q) = true after ForgetChat, want false — a record of what this person was sent survived the erasure that /forgetme reported as done, and this is the store the bot actually runs on", chatID, activityID)
+	}
+}
+
+// Slice F11: following the same MP twice leaves one follow in MemoryStore, as in Postgres.
+//
+// ⚠️ The last of the three store divergences, after F6 (nil-vs-empty Follows) and F10 (ForgetChat
+// and the sent record). F4 stopped duplicates in PostgresStore with the follows_chat_member
+// unique index plus ON CONFLICT DO NOTHING; MemoryStore still appends unconditionally, so the
+// same call on the same interface does one thing on Postgres and another in memory. Bot cannot
+// tell which it holds, which makes this a behaviour that changes with WIRING rather than code.
+//
+// ⚠️ This is the one of the three a user can see. /unfollow builds a chooser from Follows, so a
+// double-followed MP appears as two identical choices — and the poll loop pushes every division
+// from that MP to the chat twice.
+//
+// ⚠️ The second FollowMP must return nil, not an error. A repeated /follow is an ordinary thing
+// for a user to do — forgetting they already follow someone, or tapping an old button — and the
+// contract F4 set is that it is ACCEPTED and does nothing, not rejected. That is asserted here
+// rather than left implied, because "reject the duplicate" passes the count assertion below
+// while breaking the command.
+func TestMemoryStore_followingTheSameMPTwice_isNotADuplicate(t *testing.T) {
+	store := bot.NewMemoryStore()
+	const chatID = int64(1)
+	mp := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("first FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+	}
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("second FollowMP(%d, %+v) returned error: %v — a repeated /follow must be accepted and do nothing, not be rejected", chatID, mp, err)
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+
+	if len(follows) != 1 {
+		t.Fatalf("Follows(%d) = %+v, want exactly one %+v — a doubled follow shows in /unfollow as two identical choices and pushes every division from that MP twice", chatID, follows, mp)
+	}
+	if follows[0] != mp {
+		t.Errorf("Follows(%d)[0] = %+v, want %+v", chatID, follows[0], mp)
+	}
+}
