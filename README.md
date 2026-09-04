@@ -121,8 +121,8 @@ command pointing at this repo.
 
 ## Status
 
-**Working, running locally against real Telegram, not yet deployed.** Built test-first in
-vertical slices; 84 tests, Go 1.26.
+**Working, running locally against real Telegram and PostgreSQL, not yet deployed.** Built
+test-first in vertical slices; 100 tests, Go 1.26.
 
 Done:
 
@@ -130,12 +130,16 @@ Done:
 - MP lookup and Commons Votes come from the live Parliament APIs.
 - The bot pushes new divisions to followers on its own initiative, hourly.
 - A first follow records the MP's current activity silently, so nobody gets a backlog blast.
-- Storage is behind a `Store` interface, ready for a second implementation.
+- Storage is behind a `Store` interface with two implementations, and the compiler checks both
+  satisfy it.
+- **Persistence — confirmed live.** Chats, follows and sent-items live in PostgreSQL, and a
+  follow made on a phone survived stopping and restarting the process. The store creates its own
+  schema on first connect, so there is no migration step to run. The bot reads `DATABASE_URL`
+  and refuses to start without it rather than falling back to memory and losing follows on the
+  next restart.
 
 Not done:
 
-- **Persistence.** State is in memory, so a restart loses every follow. PostgreSQL is next
-  and is what makes deployment possible at all.
 - **Deployment.** No Dockerfile, Deployment, or Flux manifests yet.
 - Written Questions and Hansard — of the three activity feeds, only Commons Votes is real.
 - Postcode lookup.

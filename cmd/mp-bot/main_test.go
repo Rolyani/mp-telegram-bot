@@ -295,3 +295,38 @@ func TestPushOnce_oneFailedSend_doesNotAbandonTheRest(t *testing.T) {
 		t.Error("pushOnce() returned nil error, want the failed send reported")
 	}
 }
+
+// Slice F14: the bot refuses to start without a database rather than falling back to memory.
+//
+// ⚠️ The refusal IS the slice. The tempting alternative — no DATABASE_URL, so use MemoryStore —
+// is the worst option available: the bot starts, answers commands, accepts follows, looks
+// entirely healthy, and loses every follow for every user on the first pod restart. In a cluster
+// where a restart is routine that is not a degraded mode, it is silent data loss wearing a green
+// tick. Refusing by name turns it into one line of output before anything is lost.
+//
+// ⚠️ Same shape as telegramFromEnv above, and for the same reason: a missing token exits because
+// it cannot fix itself. A missing DSN cannot either.
+//
+// ⚠️ Only the refusal is tested here. The happy path is NewPostgresStore, which F2 to F13 cover
+// against a real database; repeating it here would need this package to have a DSN too, and
+// would prove nothing new about the wiring.
+func TestStoreFromEnv_withoutADatabaseURL_refusesByName(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	store, err := storeFromEnv()
+	if err == nil {
+		t.Fatalf("storeFromEnv() with no DATABASE_URL returned nil error, want a refusal — starting on MemoryStore loses every follow on the next restart")
+	}
+
+	// The variable's name has to be IN the message, as with TELEGRAM_TOKEN: "no database"
+	// sends the reader looking, "DATABASE_URL is not set" tells them what to do next.
+	if !strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Errorf("error is %q, want it to name DATABASE_URL so the reader knows what to set", err)
+	}
+
+	// Nothing usable may come back alongside the error. A non-nil store here invites a caller
+	// to press on with one that was never connected.
+	if store != nil {
+		t.Errorf("storeFromEnv() returned a store %v alongside the error, want nil", store)
+	}
+}
