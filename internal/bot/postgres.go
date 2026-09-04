@@ -14,6 +14,8 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+var _ Store = (*PostgresStore)(nil)
+
 // NewPostgresStore connects to the database named by dsn and returns a store ready to use.
 //
 // ⚠️ A POOL, not a connection. This process runs for weeks and the database WILL restart
