@@ -203,6 +203,28 @@ func (s *PostgresStore) ForgetChat(chatID int64) error {
 	return tx.Commit(ctx)
 }
 
+// RemoveChat unsubscribes a chat, leaving its follows and its sent-items record in place. It is
+// what /stop calls; erasing everything is ForgetChat's job, and the difference between the two
+// is the whole reason both exist.
+//
+// ⚠️ One statement, so no transaction. ForgetChat needs one because a mid-way failure there
+// could leave the chat gone and the follows behind, having told the user everything was removed.
+// A single Exec is already atomic and a transaction around it would buy nothing.
+//
+// ⚠️ Deleting a row that is not there is not an error. A /stop from a chat that never sent
+// /start matches nothing, affects zero rows and succeeds — which is why the rows-affected count
+// in the returned tag is deliberately not checked. Treating zero as a failure would report an
+// error to a user whose request was already satisfied.
+func (s *PostgresStore) RemoveChat(chatID int64) error {
+	ctx := context.Background()
+
+	if _, err := s.pool.Exec(ctx, `DELETE FROM chats WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("delete chat: %w", err)
+	}
+
+	return nil
+}
+
 // Close releases the pool's connections. The program calls it once, at shutdown; the tests call
 // it on every store they open.
 func (s *PostgresStore) Close() {

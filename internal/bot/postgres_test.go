@@ -449,3 +449,63 @@ func TestPostgresStore_forgetChat_leavesNothingBehind(t *testing.T) {
 		t.Errorf("WasSent(%d, %q) = true after ForgetChat, want false — a record of what this person was sent survived an erasure that reported success", chatID, activityID)
 	}
 }
+
+// Slice F12: RemoveChat unsubscribes a chat and leaves its follows alone.
+//
+// ⚠️ The second assertion is the one with the content. Deleting the chat row is the easy half
+// and ForgetChat already does it; what makes RemoveChat a DIFFERENT METHOD rather than a copy is
+// that it stops there. Without a follows assertion this test passes against a RemoveChat that is
+// ForgetChat under another name, and the store would quietly answer /stop and /forgetme
+// identically.
+//
+// ⚠️ This mirrors MemoryStore.RemoveChat, which deletes from s.chats only. It does NOT settle
+// issue 14 — /stop replies "Your details have been removed." while keeping the follow list, and
+// whether that reply or that behaviour is the thing to change is still open. If /stop later
+// becomes "leave and forget me", both stores change together and this test changes with them.
+// What is being pinned here is that the two implementations agree TODAY, which is the property
+// F6, F10 and F11 each had to be a slice to restore.
+//
+// ⚠️ No reconnect, for the reason F4 and F9 give: F2 and F3 established that this store really
+// reaches Postgres, and there is no cache a stale read could come from. The question here is
+// whether the DELETE ran and stopped at one table, which one connection can answer.
+func TestPostgresStore_removeChat_unsubscribesButKeepsFollows(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+	mp := bot.Member{ID: 4514, Name: "Sir Keir Starmer"}
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.AddChat(chatID); err != nil {
+		t.Fatalf("AddChat(%d) returned error: %v", chatID, err)
+	}
+	if err := store.FollowMP(chatID, mp); err != nil {
+		t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+	}
+
+	if err := store.RemoveChat(chatID); err != nil {
+		t.Fatalf("RemoveChat(%d) returned error: %v", chatID, err)
+	}
+
+	chats, err := store.Chats()
+	if err != nil {
+		t.Fatalf("Chats() returned error: %v", err)
+	}
+	for _, id := range chats {
+		if id == chatID {
+			t.Errorf("Chats() still contains %d after RemoveChat — the chat would go on being polled and pushed to after asking to stop", chatID)
+		}
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+	want := []bot.Member{mp}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v after RemoveChat, want %+v — RemoveChat unsubscribes, it does not erase; erasing everything is ForgetChat's job", chatID, follows, want)
+	}
+}
