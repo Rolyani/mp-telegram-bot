@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2920,5 +2921,49 @@ func TestMemoryStore_followingTheSameMPTwice_isNotADuplicate(t *testing.T) {
 	}
 	if follows[0] != mp {
 		t.Errorf("Follows(%d)[0] = %+v, want %+v", chatID, follows[0], mp)
+	}
+}
+
+// Slice F16 (issue 25): MemoryStore.Follows comes back ordered by name, as PostgresStore now does.
+//
+// ⚠️ This is the half that actually CLOSES the divergence. F15 gave Postgres an ORDER BY; until
+// this lands, Store makes two promises and which one you get depends on wiring rather than code —
+// the exact shape of F6, F10 and F11, and the fourth time we have had it.
+//
+// ⚠️ THE FOLLOW ORDER IS THE TEST, same as F15. These are followed last-first on purpose so that
+// "returns the slice as stored" and "returns it sorted" give different answers. Follow them
+// alphabetically and this passes against the unsorted store, which is a test shaped like proof
+// and holding none.
+//
+// ⚠️ Sorting must not turn the no-follows case back into nil —
+// TestMemoryStore_followsForAChatThatFollowsNobody_isEmptyNotNil is the guard on that, and it is
+// the reason to sort a COPY rather than reach for a fresh slice built by hand.
+//
+// ⚠️ What this does NOT promise: that the two stores agree on every name. Postgres sorts by the
+// database collation and Go's < sorts by bytes, so "Marsha de Cordova" lands in a different place
+// in each. Both names here are ordinary ASCII with uppercase initials, where the two rules
+// coincide. Issue 26 is that gap; it is deliberately not this slice.
+func TestMemoryStore_follows_areOrderedByName(t *testing.T) {
+	store := bot.NewMemoryStore()
+	const chatID = int64(1)
+
+	abbott := bot.Member{ID: 172, Name: "Diane Abbott"}
+	zahawi := bot.Member{ID: 4113, Name: "Nadhim Zahawi"}
+
+	// Followed last-first, so stored order and alphabetical order disagree.
+	for _, mp := range []bot.Member{zahawi, abbott} {
+		if err := store.FollowMP(chatID, mp); err != nil {
+			t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+		}
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+
+	want := []bot.Member{abbott, zahawi}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v, want %+v — the two stores must order a follow list the same way, or /unfollow numbers it differently depending on which store Bot happens to hold", chatID, follows, want)
 	}
 }

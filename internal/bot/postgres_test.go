@@ -568,3 +568,53 @@ func TestPostgresStore_unfollowMP_removesOneAndReportsWhetherItWasThere(t *testi
 		t.Errorf("second UnfollowMP(%d, %d) = true, want false — nothing was there to remove, and saying yes confirms an unfollow that never happened", chatID, gone.ID)
 	}
 }
+
+// Slice F15 (issue 25): Follows comes back ordered by name.
+//
+// ⚠️ SQL guarantees NO row order without an ORDER BY. Postgres happens to hand back small tables
+// in insertion order today, but that is an accident of the plan it picked, not a promise — add a
+// row, vacuum the table, or let it choose an index scan and the order changes underneath us with
+// no code change at all.
+//
+// ⚠️ Why that is a bug and not a wobble: /unfollow builds a NUMBERED CHOOSER out of this slice.
+// The user reads "2. Diane Abbott" and sends 2 — and if the order moved between those two
+// messages, they unfollow somebody else. A cosmetic-looking guarantee is load-bearing here.
+//
+// ⚠️ THE INSERT ORDER IS THE TEST. These two are followed in reverse alphabetical order on
+// purpose, so that "no ORDER BY" and "ORDER BY name" give DIFFERENT answers. Follow them
+// alphabetically instead and this test passes against the unfixed store — it would be a test
+// that proves nothing, which is worse than no test because it looks like proof.
+//
+// ⚠️ This is the FOURTH store divergence, after F6 (nil-vs-empty), F10 (ForgetChat and the sent
+// record) and F11 (duplicate follows). MemoryStore returns insertion order, so closing this one
+// takes both stores — F16 is the other half, and until it lands Store still makes two promises.
+func TestPostgresStore_follows_areOrderedByName(t *testing.T) {
+	dsn := testDSN(t)
+	chatID := uniqueChatID()
+
+	abbott := bot.Member{ID: 172, Name: "Diane Abbott"}
+	zahawi := bot.Member{ID: 4113, Name: "Nadhim Zahawi"}
+
+	store, err := bot.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("NewPostgresStore() returned error: %v", err)
+	}
+	defer store.Close()
+
+	// Followed last-first, so insertion order and alphabetical order disagree.
+	for _, mp := range []bot.Member{zahawi, abbott} {
+		if err := store.FollowMP(chatID, mp); err != nil {
+			t.Fatalf("FollowMP(%d, %+v) returned error: %v", chatID, mp, err)
+		}
+	}
+
+	follows, err := store.Follows(chatID)
+	if err != nil {
+		t.Fatalf("Follows(%d) returned error: %v", chatID, err)
+	}
+
+	want := []bot.Member{abbott, zahawi}
+	if !reflect.DeepEqual(follows, want) {
+		t.Errorf("Follows(%d) = %+v, want %+v — /unfollow numbers this slice, so an order the store does not promise is a wrong-MP unfollow waiting to happen", chatID, follows, want)
+	}
+}
