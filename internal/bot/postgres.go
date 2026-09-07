@@ -139,7 +139,8 @@ func (s *PostgresStore) Chats() ([]int64, error) {
 func (s *PostgresStore) Follows(chatID int64) ([]Member, error) {
 	ctx := context.Background()
 
-	rows, err := s.pool.Query(ctx, `SELECT member_id, name FROM follows WHERE chat_id = $1`, chatID)
+	rows, err := s.pool.Query(ctx, `SELECT member_id, name FROM follows WHERE chat_id = $1
+	ORDER BY name`, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("select follows: %w", err)
 	}

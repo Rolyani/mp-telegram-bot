@@ -212,14 +212,23 @@ func (s *MemoryStore) UnfollowMP(chatID int64, id int) (bool, error) {
 // Follows returns the MPs that chatID follows, or an empty slice if it follows none.
 //
 // ⚠️ Empty, never nil. Indexing a map with an absent key gives the zero value, and the zero
-// value of a slice is nil — so the check below is the only thing stopping a chat nobody has
+// value of a slice is nil — so the copy below is the only thing stopping a chat nobody has
 // seen from answering differently to PostgresStore, which returns empty. Bot holds the Store
 // interface and cannot tell the two apart, so both owe the same answer.
+//
+// ⚠️ append([]Member{}, ...) rather than slices.Clone, which looks like the tidier spelling and
+// is not: Clone is append(s[:0:0], s...) and PRESERVES NIL on purpose, which would hand this
+// method's nil straight back and re-open the divergence the line above exists to close.
+//
+// ⚠️ Sorted by name (issue 25), matching the ORDER BY name in PostgresStore.Follows. /unfollow
+// builds a numbered chooser out of this slice, so an order nobody promises is a wrong-MP
+// unfollow waiting to happen. The copy is also what keeps the sort off the stored slice — a
+// caller reordering what it was handed no longer reorders the store.
 func (s *MemoryStore) Follows(chatID int64) ([]Member, error) {
-	follows := s.follows[chatID]
-	if follows == nil {
-		return []Member{}, nil
-	}
+	follows := append([]Member{}, s.follows[chatID]...)
+	slices.SortFunc(follows, func(a, b Member) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return follows, nil
 }
 
