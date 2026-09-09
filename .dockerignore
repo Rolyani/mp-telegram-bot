@@ -1,0 +1,18 @@
+# A build context is not a private place. Everything not excluded here is uploaded to the
+# daemon and cached, so the token must never enter it — even though the final image copies
+# only /mp-bot out of the builder and could not leak it anyway. Two independent reasons to
+# keep it out, and the weaker one is the one people rely on.
+.env
+
+# Nothing the build needs, and the largest thing in the repo.
+.git
+.gitignore
+
+# Gitignored and unbacked-up. Irrelevant to compiling a binary.
+docs/
+.claude/
+
+# ⚠️ Test files are deliberately NOT excluded. `go build ./cmd/mp-bot` never compiles a
+# _test.go file, so leaving them out could not change the binary — the only effect would be
+# to quietly foreclose a `RUN go test ./...` step in the builder stage. This file earns its
+# keep on secrets and bulk, not on tidiness.
