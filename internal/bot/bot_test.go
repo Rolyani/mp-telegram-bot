@@ -2307,6 +2307,47 @@ func TestVotesSource_Activity_returnsTheMPsVotesAsActivity(t *testing.T) {
 	}
 }
 
+// Loop-back slice, issue 1: a TELLER did not vote, and must not be reported as having voted.
+//
+// A teller is one of the MPs who physically counts the division lobby. They are recorded in
+// the API with MemberVotedAye AND MemberVotedNo both false — the payload's way of saying
+// "was present, cast no vote". Activity reads only MemberVotedNo and treats "not No" as Aye,
+// so every teller currently comes back as "Voted Aye on: …".
+//
+// ⚠️ That is the one kind of bug this bot cannot afford: a factually false statement about
+// how a named MP voted, sent unprompted to someone who followed them precisely to know.
+//
+// ⭐ The fixture is the test here. MemberVotedAye and MemberVotedNo are BOTH false and both
+// spelled out in the JSON rather than left off — a teller is not distinguishable from an Aye
+// by the two vote fields alone, which is exactly why reading MemberWasTeller is the only
+// possible fix. Drop MemberWasTeller from this payload and the item is a genuine Aye.
+func TestVotesSource_Activity_teller_isNotReportedAsHavingVoted(t *testing.T) {
+	// Fake Commons Votes API: one real division, this time one the MP TOLD rather than
+	// voted in. Trimmed to the fields the bot reads, plus the one it does not read yet.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"MemberId":4514,"MemberVotedAye":false,"MemberVotedNo":false,
+			"MemberWasTeller":true,
+			"PublishedDivision":{"DivisionId":2410,"Date":"2026-07-14T17:41:00",
+			"Title":"Public Office (Accountability) Bill Report Stage: Amendment 20"}}]`)
+	}))
+	defer srv.Close()
+
+	source := bot.NewVotesSource(srv.URL)
+	items := source.Activity(4514)
+
+	if len(items) != 1 {
+		t.Fatalf("Activity returned %d items, want 1: %v", len(items), items)
+	}
+	got := items[0]
+
+	// A teller's division is still worth telling the user about — they were there, and it
+	// is a matter of record. It is the CLAIM ABOUT THEIR VOTE that must go.
+	wantText := "Was a teller for: Public Office (Accountability) Bill Report Stage: Amendment 20"
+	if got.Text != wantText {
+		t.Errorf("Activity Text = %q, want %q — a teller cast no vote, so reporting one is a false statement about an MP's record", got.Text, wantText)
+	}
+}
+
 // --- Phase E: real Telegram I/O ---------------------------------------------------------
 
 // Slice E1: the bot can say something out loud.
