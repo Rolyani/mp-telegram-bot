@@ -60,6 +60,7 @@ func (v *VotesSource) Activity(memberID int) []Activity {
 	// case-insensitively. resolver.go needs tags only because its wire names genuinely differ.
 	var payload []struct {
 		MemberVotedNo     bool
+		MemberWasTeller   bool
 		PublishedDivision struct {
 			DivisionId int
 			Date       string
@@ -85,10 +86,20 @@ func (v *VotesSource) Activity(memberID int) []Activity {
 			fmt.Fprintln(os.Stderr, "votes API: undated division", division.DivisionId, err)
 		}
 
-		// How they voted, then what it was.
-		position := "Voted Aye on: "
-		if voted.MemberVotedNo {
+		// What they did, then what it was.
+		//
+		// ⚠️ Teller is tested FIRST and must stay first. A teller counts the lobby and casts no
+		// vote, so MemberVotedAye and MemberVotedNo are BOTH false on their record — reorder
+		// these cases and every teller falls through to the Aye default, which is exactly the
+		// bug this switch was written to fix (issue 1). The ordering IS the fix.
+		var position string
+		switch {
+		case voted.MemberWasTeller:
+			position = "Was a teller for: "
+		case voted.MemberVotedNo:
 			position = "Voted No on: "
+		default:
+			position = "Voted Aye on: "
 		}
 
 		items = append(items, Activity{
