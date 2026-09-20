@@ -24,11 +24,15 @@ type VotesSource struct {
 	client  *http.Client
 }
 
-func NewVotesSource(baseURL string) *VotesSource {
+func NewVotesSourceWithTimeout(baseURL string, timeout time.Duration) *VotesSource {
 	return &VotesSource{
 		baseURL: baseURL,
-		client:  &http.Client{},
+		client:  &http.Client{Timeout: timeout},
 	}
+}
+
+func NewVotesSource(baseURL string) *VotesSource {
+	return NewVotesSourceWithTimeout(baseURL, 10*time.Second)
 }
 
 // Activity returns the MP's recent divisions, newest first as the API supplies them.

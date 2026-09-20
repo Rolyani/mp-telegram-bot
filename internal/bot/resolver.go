@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 type Resolver struct {
@@ -19,11 +20,15 @@ type Member struct {
 	Name string
 }
 
-func NewResolver(baseURL string) *Resolver {
+func NewResolverWithTimeout(baseURL string, timeout time.Duration) *Resolver {
 	return &Resolver{
+		client:  &http.Client{Timeout: timeout},
 		baseURL: baseURL,
-		client:  &http.Client{},
 	}
+}
+
+func NewResolver(baseURL string) *Resolver {
+	return NewResolverWithTimeout(baseURL, 10*time.Second)
 }
 
 func (r *Resolver) ResolveName(name string) ([]Member, error) {

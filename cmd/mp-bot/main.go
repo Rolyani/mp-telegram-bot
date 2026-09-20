@@ -13,12 +13,20 @@
 // message — was deleted once the Telegram loop worked. It existed to make the package runnable
 // at all when nothing else could execute it, and had no caller left.
 //
-// ⚠️ The two cycles run at deliberately different rates. Answering a message must feel
-// immediate, so pollOnce runs every couple of seconds. Asking Parliament what an MP has been
-// voting on has no such need and a real cost — it is somebody else's API, divisions happen a
-// handful of times on a sitting day and never overnight — so pushOnce runs hourly. They are
-// separate functions rather than one, because folding the push into the poll would weld the
-// polite rate to the responsive one.
+// ⚠️ The two cycles run at deliberately different rates, and since the long poll landed they
+// also run on SEPARATE GOROUTINES. Answering a message must feel immediate, so pollOnce is run
+// back to back forever and paced by Telegram itself — a getUpdates call now asks Telegram to
+// hold the connection open for 25 seconds and answer the moment something arrives, so the poll
+// loop spends nearly all its time blocked and a message is picked up the instant it is sent.
+// Asking Parliament what an MP has been voting on has no such need and a real cost — it is
+// somebody else's API, divisions happen a handful of times on a sitting day and never
+// overnight — so pushOnce runs hourly. They are separate functions rather than one, because
+// folding the push into the poll would weld the polite rate to the responsive one.
+//
+// ⚠️ They were one goroutine and a select until the long poll made that untenable. A pollOnce
+// that blocks for 25 seconds inside a shared select delays every push by up to that long, and
+// the two clocks stop being independent — the exact coupling the paragraph above says must not
+// happen. Splitting them restores it, and costs a concurrency argument that is set out on main.
 //
 // ⚠️ The push is only safe because /follow records a baseline. Without it the first push would
 // deliver the MP's entire back catalogue, one message per division, to a phone.
@@ -34,7 +42,17 @@ import (
 )
 
 const (
-	pollEvery = 2 * time.Second
+	// pollErrorBackoff is what stands between this program and a hot loop.
+	//
+	// ⚠️ The poll loop has no ticker any more: it calls pollOnce back to back and lets the 25s
+	// long poll do the pacing. That works perfectly while Telegram is ANSWERING. The moment it
+	// is not — DNS down, a revoked token returning 401, a 502 from a load balancer — GetUpdates
+	// returns instantly, and a bare `for { pollOnce() }` becomes a loop that hammers the API as
+	// fast as the CPU allows and writes the same error to stderr thousands of times a second.
+	// The 2s ticker this replaced was quietly preventing that; nothing else does, so the sleep
+	// below is load-bearing rather than polite.
+	pollErrorBackoff = 5 * time.Second
+
 	pushEvery = time.Hour
 )
 
@@ -52,6 +70,26 @@ const (
 // network fault for as long as it takes someone to check. A failed cycle PRINTS AND CARRIES
 // ON: Parliament being unreachable for thirty seconds must not take the bot down until a human
 // notices.
+//
+// ⭐ WHY TWO GOROUTINES ARE SAFE HERE, since nothing in the types says so and the next person to
+// touch this will be right to ask. Three things are shared between the loops, and each is fine
+// for a different reason:
+//
+//	*bot.Bot        — immutable after New: three interface fields, never reassigned, no state.
+//	*bot.Telegram   — its client is an *http.Client, which is built for concurrent use; its one
+//	                  mutable field, the getUpdates offset, is touched ONLY by GetUpdates, and
+//	                  GetUpdates is called only from the poll loop. The push loop sends and
+//	                  never polls, which is already a rule for a different reason (see pushOnce).
+//	*bot.PostgresStore — a pgxpool, which exists to be shared across goroutines.
+//
+// ⚠️ MemoryStore is NOT safe this way — it is bare maps, and two loops writing to it would race.
+// It is unreachable from here only because storeFromEnv refuses to fall back to it, which makes
+// that refusal load-bearing for concurrency as well as for data loss.
+//
+// ⚠️ And what got WORSE, which is the price of the isolation: a hang in one loop is now quieter
+// than it was, not louder. Before, either failure stopped everything and the silence was total.
+// Now the bot can answer messages perfectly while pushes have silently stopped for days, or the
+// reverse. Nothing watches for that yet.
 func main() {
 	tg, err := telegramFromEnv()
 	if err != nil {
@@ -67,19 +105,26 @@ func main() {
 
 	b := bot.New(store, bot.NewResolver("https://members-api.parliament.uk"), bot.NewVotesSource("https://commonsvotes-api.parliament.uk"))
 
-	polls := time.NewTicker(pollEvery)
-	pushes := time.NewTicker(pushEvery)
-
-	for {
-		select {
-		case <-polls.C:
+	// The poll loop, on its own goroutine, with no ticker: pollOnce blocks inside the 25s long
+	// poll until Telegram has something to say, so calling it back to back IS the pacing.
+	go func() {
+		for {
 			if err := pollOnce(b, tg); err != nil {
 				fmt.Fprintln(os.Stderr, err)
+				// ⚠️ Only on the error path, and it is not cosmetic. A failing GetUpdates
+				// returns immediately, so without this the loop spins. See pollErrorBackoff.
+				time.Sleep(pollErrorBackoff)
 			}
-		case <-pushes.C:
-			if err := pushOnce(b, tg); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-			}
+		}
+	}()
+
+	// The push loop stays on the main goroutine, and that is deliberate: main returning ends
+	// the process and takes every goroutine with it, so ONE of the two loops has to block here.
+	// The hourly one is the better choice — it is the cheaper loop to own, and a poll loop that
+	// blocks in a goroutine reads more naturally than a push that does.
+	for range time.Tick(pushEvery) {
+		if err := pushOnce(b, tg); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 		}
 	}
 }
