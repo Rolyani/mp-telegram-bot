@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 )
 
 // Telegram is the outbound half of the bot's Telegram I/O: it turns a Reply into a message
@@ -23,10 +24,11 @@ import (
 // carries the token IN THE PATH, so a "base URL" with the token already in it looks
 // perfectly natural right up until it appears in a stack trace.
 type Telegram struct {
-	baseURL string
-	token   string
-	client  *http.Client
-	offset  int64
+	baseURL     string
+	token       string
+	client      *http.Client
+	offset      int64
+	pollTimeout time.Duration
 }
 
 // NewTelegram returns a Telegram that talks to the Bot API at baseURL, authenticating as
@@ -39,12 +41,17 @@ type Telegram struct {
 //
 // token is the string BotFather issues. Anyone holding it can read every message sent to
 // the bot and post as it, so it belongs in the environment, never in the source.
-func NewTelegram(baseURL, token string) *Telegram {
+func NewTelegramPolling(baseURL, token string, poll time.Duration) *Telegram {
 	return &Telegram{
-		baseURL: baseURL,
-		token:   token,
-		client:  &http.Client{},
+		baseURL:     baseURL,
+		token:       token,
+		pollTimeout: poll,
+		client:      &http.Client{Timeout: poll + poll/5},
 	}
+}
+
+func NewTelegram(baseURL, token string) *Telegram {
+	return NewTelegramPolling(baseURL, token, 25*time.Second)
 }
 
 // SendMessage delivers text to the chat with the given ID, returning an error if Telegram
@@ -126,6 +133,7 @@ func (t *Telegram) SendMessage(chatID int64, text string) error {
 func (t *Telegram) GetUpdates() ([]Update, error) {
 	values := url.Values{}
 	values.Set("offset", strconv.FormatInt(t.offset, 10))
+	values.Set("timeout", strconv.Itoa(int(t.pollTimeout.Seconds())))
 
 	endpoint := t.baseURL + "/bot" + t.token + "/getUpdates?" + values.Encode()
 

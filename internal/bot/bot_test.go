@@ -2761,6 +2761,266 @@ func TestTelegram_GetUpdates_updateIDEqualToTheOffset_stillAcknowledgesIt(t *tes
 	}
 }
 
+// Issue 28, slice 1: the bot stops asking Telegram 43,200 times a day whether anything happened.
+//
+// getUpdates supports LONG POLLING. Send timeout=N and Telegram holds the connection open for
+// up to N seconds, answering the moment an update arrives — or with an empty list when N
+// expires. Send nothing, which is what the bot does today, and N is 0: every call returns
+// instantly with whatever happens to be queued, so the caller has to pace itself with a ticker
+// and a message waits up to that whole tick to be noticed.
+//
+// ⚠️ The parameter is worth exactly one line of production code and changes two things at once,
+// which is why the value is asserted rather than merely its presence:
+//
+//   - the ~2s that main.go's pollEvery adds to EVERY message comes off, because the connection
+//     is already open and waiting when the message arrives; and
+//   - ~43,200 requests a day become ~3,400, essentially all of which now return something.
+//
+// ⚠️ It does NOT belong in the same breath as a client timeout, but it cannot be separated from
+// one for long: a request the server deliberately holds for 25 seconds is indistinguishable, to
+// a client with no timeout, from a request the server has abandoned. Slice 2 is that timeout,
+// and the number it picks must EXCEED the 25 asserted here or the client cancels every
+// successful long poll before Telegram can answer it. See issue 29.
+//
+// The test asserts the query parameter and nothing else. It does not sleep, does not time
+// anything, and does not require the httptest server to actually hold the connection — the
+// behaviour under test is "the bot asks Telegram to wait", and Telegram's honouring of that is
+// Telegram's business, not something this suite can or should prove.
+func TestTelegram_GetUpdates_asksTelegramToHoldTheConnectionOpen(t *testing.T) {
+	var gotTimeout string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTimeout = r.URL.Query().Get("timeout")
+		fmt.Fprint(w, `{"ok":true,"result":[]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	if _, err := tg.GetUpdates(); err != nil {
+		t.Fatalf("GetUpdates returned error: %v", err)
+	}
+
+	// ⚠️ Absent and "0" are NOT interchangeable here, unlike offset on a first call. Both mean
+	// "return immediately" to Telegram, and returning immediately is the bug.
+	if gotTimeout == "" {
+		t.Fatalf("GetUpdates sent no timeout parameter — Telegram defaults to 0, which is the short poll this slice exists to remove")
+	}
+
+	if gotTimeout != "25" {
+		t.Errorf("GetUpdates sent timeout=%q, want %q — the number is load-bearing: slice 2's client timeout must exceed it, and a client timeout below it cancels every successful long poll", gotTimeout, "25")
+	}
+}
+
+// Issue 29, slice 2: one unresponsive server can no longer stop the entire bot forever.
+//
+// http.Client's zero Timeout means NO timeout — not a generous one. A server that accepts the
+// connection and then never writes a response parks that request for as long as the process
+// lives. Everything the bot does happens on one goroutine (main's select calls pollOnce or
+// pushOnce and waits), so that one parked request stops the poll loop, the hourly push, and
+// every log line the bot would otherwise print.
+//
+// ⚠️ It is the failure mode with NO SYMPTOM. A crash is restarted by Kubernetes; a hang is not,
+// because the container is still running and the process is still alive. There are no liveness
+// probes by design — the bot serves no HTTP — so nothing in the cluster can notice either. From
+// outside, a hung bot and a working bot nobody has messaged look identical.
+//
+// ⭐ This slice and slice 1 are one change, not two, and this is the test that says why. A long
+// poll is a request the server deliberately holds open for 25 seconds; to a client with no
+// timeout that is indistinguishable from a request the server has abandoned. Slice 1 made the
+// bot ask for 25 seconds of silence. Without this slice it would also wait forever for the
+// twenty-sixth.
+//
+// ⚠️ The client timeout must EXCEED the long poll, and the two numbers therefore cannot be set
+// independently — a client timeout below the poll timeout cancels every SUCCESSFUL long poll
+// before Telegram can answer it, and the bot receives nothing while looking busy. That is why
+// NewTelegramPolling takes one duration and derives the other, rather than taking both: it is
+// not a convenience, it is the invariant made unstateable. Nothing below asserts the
+// derivation, because a test that pins the arithmetic would break on a change that is not a
+// behaviour change; what is asserted is that the hang ends.
+//
+// The test passes a 50ms poll so the wait is milliseconds rather than the production 25s. It
+// asserts an ERROR RETURNED, not a specific error: whether it arrives as a url.Error wrapping
+// context deadline exceeded is net/http's business and has changed between Go releases.
+func TestTelegram_GetUpdates_serverNeverResponds_givesUpInsteadOfHangingForever(t *testing.T) {
+	// The handler blocks until the test is over, which is the whole fixture: a server that is
+	// reachable, accepts the connection, and then simply never answers.
+	//
+	// ⚠️ Deferred calls run last-in-first-out, so close(release) runs BEFORE srv.Close(). That
+	// order is required, not incidental — srv.Close() waits for outstanding handlers to return,
+	// so closing the server while this one is still parked deadlocks the test rather than
+	// failing it.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	tg := bot.NewTelegramPolling(srv.URL, "TESTTOKEN", 50*time.Millisecond)
+
+	// Run the call on its own goroutine. If the bug is present GetUpdates never returns, and a
+	// test that called it directly would hang the whole `go test` run until the package timeout
+	// killed it ten minutes later with a stack dump — a failure that reads as infrastructure
+	// trouble rather than as this assertion. The select below turns "never returns" into a
+	// named failure in one second.
+	type result struct {
+		err error
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, err := tg.GetUpdates()
+		done <- result{err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Fatalf("GetUpdates returned a nil error after %v against a server that never responded — a request that was never answered must not be reported as a successful empty poll", time.Since(start))
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("GetUpdates had not returned after 1s against a server that never responds — the client's Timeout is still zero, which means no timeout at all, and in production this is the whole bot stopped with no crash, no log line and no liveness probe to notice")
+	}
+}
+
+// Issue 29, slice 2b: the duration the caller asks for is the duration Telegram is asked to
+// hold, so the client timeout and the long poll can never disagree.
+//
+// ⭐ This is the test that earns the constructor its shape. NewTelegramPolling takes ONE
+// duration and derives the client timeout from it, rather than taking both, specifically so
+// that a client timeout below the long poll cannot be expressed. That guarantee is worth
+// exactly nothing if the duration reaches the client and a hardcoded literal reaches the wire:
+// the two numbers are then back to being independent, with the added charm that one of them is
+// invisible at the call site.
+//
+// What that misconfiguration does in production is the reason for the ⚠️ in issue 29. Ask for
+// a 5s poll and the client gives up after 6s while Telegram has been asked to stay silent for
+// 25 — so every poll is cancelled by its own client a second after Telegram settles in to
+// wait, and the bot receives nothing at all while its logs show a busy, erroring loop. It is
+// not a hang and not a crash; it is a bot that is wide awake and structurally incapable of
+// hearing anyone.
+//
+// ⚠️ 5 seconds is asserted rather than 25 precisely BECAUSE 25 is the production default. A
+// test written against NewTelegram cannot tell a field that was plumbed through from a literal
+// that happens to match, which is how the gap this test closes survived a green bar in the
+// first place. The value here has to be one nothing in the package would produce by accident.
+//
+// The seconds conversion is the other thing pinned here. Duration is nanoseconds, and a
+// Duration formatted without converting sends timeout=5000000000 — which Telegram treats as
+// out of range rather than as an error worth telling anyone about.
+func TestTelegram_GetUpdates_sendsThePollTimeoutItWasBuiltWith(t *testing.T) {
+	var gotTimeout string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTimeout = r.URL.Query().Get("timeout")
+		fmt.Fprint(w, `{"ok":true,"result":[]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegramPolling(srv.URL, "TESTTOKEN", 5*time.Second)
+
+	if _, err := tg.GetUpdates(); err != nil {
+		t.Fatalf("GetUpdates returned error: %v", err)
+	}
+
+	if gotTimeout != "5" {
+		t.Errorf("built with a 5s poll timeout, GetUpdates sent timeout=%q, want %q — the client timeout is derived from the duration passed in, so a wire value that does not follow it puts the two back out of step, and a client that gives up before the long poll ends receives nothing at all", gotTimeout, "5")
+	}
+}
+
+// Issue 29, slice 3a: a hung Parliament no longer takes the bot with it.
+//
+// Same zero-Timeout http.Client as the Telegram one, same single goroutine, and the fix is the
+// same shape — but the reasoning for the NUMBER is different, so it is worth saying once here.
+// Telegram's timeout is derived from the long poll because the two must not disagree. Nothing
+// is long-polling members-api: these are ordinary request/response calls, and issue 30 measured
+// them at 1.11s cold and 0.07s warm. The production 10s is therefore chosen as "several times
+// the worst thing we have actually measured", not derived from anything.
+//
+// ⚠️ A timeout too CLOSE to the real response time is its own bug, and a nastier one than none
+// at all: /find would start failing for whichever queries Parliament happened to be slow on
+// that morning, intermittently, with nothing in the logs to distinguish it from the API being
+// down. A timeout exists to end a hang, not to enforce a latency budget.
+//
+// This is the path a user is waiting on — /find and /follow both resolve a name before they can
+// answer — so the hang is at least VISIBLE here, as a reply that never arrives. That makes it
+// the less dangerous of the two remaining clients; votes.go, which runs in the hourly push with
+// nobody watching, is slice 3b.
+func TestResolver_ResolveName_serverNeverResponds_givesUpInsteadOfHangingForever(t *testing.T) {
+	// ⚠️ LIFO again: close(release) must run before srv.Close(), or Close blocks on the parked
+	// handler and the test deadlocks instead of failing.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	r := bot.NewResolverWithTimeout(srv.URL, 50*time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.ResolveName("Keir Starmer")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		// ⚠️ A nil error here would be worse than the hang. ResolveName's callers read "no
+		// error, no members" as "Parliament has never heard of them" — /find answers that no
+		// such MP exists. A request that was never answered must not be reported as an
+		// authoritative empty result.
+		if err == nil {
+			t.Fatalf("ResolveName returned a nil error against a server that never responded — an unanswered request must not be reported as 'no such MP'")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("ResolveName had not returned after 1s against a server that never responds — the client's Timeout is still zero, and since the bot is one goroutine this is the poll loop, the hourly push and all logging stopped by a single unanswered request")
+	}
+}
+
+// Issue 29, slice 3b: the last zero-Timeout client, and the one that hangs where nobody is
+// looking.
+//
+// commonsvotes-api is fetched by /latest, which a user is waiting on, and by the HOURLY PUSH,
+// which nobody is waiting on. That second caller is what makes this the most dangerous of the
+// three. A hang here stops the poll loop too — one goroutine — so the symptom is a bot that
+// answers nothing, logs nothing, crashes never, and passes every health check there is, because
+// there are none: the bot serves no HTTP and has no liveness probe by design.
+//
+// ⚠️ What this test CANNOT assert, and the reason is worth more than the test. Activity returns
+// []Activity and no error, so a request that timed out and an MP who genuinely has not voted
+// arrive at the caller as the same empty slice. The timeout below ends the hang; it does not
+// make the failure visible. Raised separately — the fix reaches ActivitySource, bot.go and every
+// fake in this file, and does not belong bolted to a one-line client change.
+//
+// So the assertion is narrow on purpose: it returns AT ALL, promptly, against a server that
+// never answers. "Promptly" is the whole behaviour. Anything more would be asserting a
+// distinction the signature cannot currently express.
+func TestVotesSource_Activity_serverNeverResponds_givesUpInsteadOfHangingForever(t *testing.T) {
+	// ⚠️ LIFO: close(release) runs before srv.Close(), or Close waits on the parked handler.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	v := bot.NewVotesSourceWithTimeout(srv.URL, 50*time.Millisecond)
+
+	done := make(chan []bot.Activity, 1)
+	go func() {
+		done <- v.Activity(4514)
+	}()
+
+	select {
+	case <-done:
+		// Nothing is asserted about the value. An empty slice is the only honest thing a
+		// signature with no error can return here, and asserting it would dress that limitation
+		// up as a designed behaviour.
+	case <-time.After(time.Second):
+		t.Fatalf("Activity had not returned after 1s against a server that never responds — this runs inside the hourly push as well as /latest, so in production it is the entire bot stopped silently, with no crash for Kubernetes to restart and no liveness probe to notice")
+	}
+}
+
 // failingStore is a Store where every method fails. It exists because MemoryStore cannot fail —
 // a map write does not return an error — so until now nothing in the suite could describe what
 // the bot does when its memory is broken. Postgres can fail in half a dozen ordinary ways
