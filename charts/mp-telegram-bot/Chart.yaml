@@ -1,0 +1,5 @@
+apiVersion: v2
+name: mp-telegram-bot
+description: A Helm chart for Rolyani's MP Telegram Bot.
+version: 0.1.0
+appVersion: "sha-34cc2e6"
