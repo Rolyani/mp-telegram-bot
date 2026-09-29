@@ -1,0 +1,20 @@
+# values.yaml for MP Telegram Bot
+#
+# NO replica. Telegram only allows 1 max connection otherwise 409
+
+image:
+  repository: ghcr.io/rolyani/mp-telegram-bot
+  tag: "sha-34cc2e6"
+
+telegram:
+  secretName: mp-telegram-bot-token
+
+database:
+  secretName: mp-bot-db-app
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 64Mi
