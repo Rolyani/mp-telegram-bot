@@ -31,8 +31,9 @@ type Telegram struct {
 	pollTimeout time.Duration
 }
 
-// NewTelegram returns a Telegram that talks to the Bot API at baseURL, authenticating as
-// the bot that token belongs to.
+// NewTelegramPolling returns a Telegram that talks to the Bot API at baseURL,
+// authenticating as the bot that token belongs to, and waiting up to poll for each
+// getUpdates call to be answered.
 //
 // baseURL is "https://api.telegram.org" in production and an httptest.Server's URL under
 // test — the same injectable-base-URL seam as NewResolver and NewVotesSource, and for the
@@ -41,6 +42,17 @@ type Telegram struct {
 //
 // token is the string BotFather issues. Anyone holding it can read every message sent to
 // the bot and post as it, so it belongs in the environment, never in the source.
+//
+// poll is Telegram's own long-poll timeout, sent as the timeout parameter on getUpdates:
+// the server holds the request open for up to this long waiting for something to happen,
+// rather than answering "nothing" straight away and inviting another request.
+//
+// ⚠️ The HTTP client's timeout is DERIVED from poll (poll + poll/5) rather than taken as a
+// second argument, so the two cannot drift apart. A client timeout shorter than poll would
+// abandon every idle long-poll from this side and be indistinguishable from a network
+// fault; the extra fifth is headroom for the answer to travel once Telegram does send one.
+// It is also what lets a test pass a poll of milliseconds and get a client that gives up in
+// milliseconds, instead of waiting out a hard-coded production timeout.
 func NewTelegramPolling(baseURL, token string, poll time.Duration) *Telegram {
 	return &Telegram{
 		baseURL:     baseURL,
@@ -50,6 +62,9 @@ func NewTelegramPolling(baseURL, token string, poll time.Duration) *Telegram {
 	}
 }
 
+// NewTelegram is NewTelegramPolling at the production long-poll timeout of 25s. It is the
+// constructor every caller wants except a test that needs the loop to turn over faster than
+// a person can wait.
 func NewTelegram(baseURL, token string) *Telegram {
 	return NewTelegramPolling(baseURL, token, 25*time.Second)
 }
