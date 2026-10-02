@@ -17,7 +17,7 @@ on:
 jobs:
   # The gate. Nothing reaches the registry unless this job is green.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned, not ubuntu-latest (issue 27)
 
     services:
       postgres:
@@ -54,7 +54,7 @@ jobs:
 
   build:
     needs: test # the gate; without this the jobs race and the image ships regardless
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned, not ubuntu-latest (issue 27)
 
     # The default GITHUB_TOKEN cannot write packages. Omit this and the push fails with a
     # 403 denied that reads exactly like broken credentials.
