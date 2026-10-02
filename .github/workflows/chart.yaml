@@ -1,0 +1,92 @@
+name: chart
+
+# Lint the chart on every PR that touches it; publish it to GHCR on a push to main.
+#
+# A separate file from image.yaml because `paths:` is a workflow-level filter: there is no way to
+# say "run this one job only when charts/ changed" inside image.yaml.
+#
+# This file is in its own `paths:` list so that editing the workflow re-runs it. That is also how
+# 0.1.0 gets its first push: merging this file is a push to main that matches.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "charts/**"
+      - ".github/workflows/chart.yaml"
+  pull_request:
+    paths:
+      - "charts/**"
+      - ".github/workflows/chart.yaml"
+
+# Actions are pinned to a commit SHA, as in image.yaml. Note setup-helm's floating `v5` tag
+# already points at a different commit from v5.0.1: `@v5` would not run the release you read.
+
+jobs:
+  chart:
+    runs-on: ubuntu-24.04 # pinned, not ubuntu-latest (issue 27)
+
+    # The default GITHUB_TOKEN cannot write packages: without this the push is a 403 that reads
+    # like broken credentials. Granted on PR runs too, but nothing below uses it unless the event
+    # is a push to main.
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      CHART_DIR: charts/mp-telegram-bot
+      # No chart name on the end: `helm push` appends it. GHCR paths must be lowercase, and there
+      # is no metadata-action here to lowercase Rolyani for us. The OCIRepository in home-lab
+      # (G5) DOES include the name: oci://ghcr.io/rolyani/charts/mp-telegram-bot
+      REGISTRY: oci://ghcr.io/rolyani/charts
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Same Helm as the local lint (alpine/helm). Unpinned, setup-helm takes whatever is
+          # newest at run time.
+          version: v4.3.0
+
+      # The gate, on PRs and main alike. Run it on the branch before merging.
+      - run: helm lint "$CHART_DIR"
+
+      # ---- Everything below runs only on a push to main. ----
+
+      # The version, once, as a step output. The steps after read it as
+      # steps.chart.outputs.version, so each one shows up separately in the Actions log.
+      - id: chart
+        if: github.event_name == 'push'
+        run: |
+          version=$(helm show chart "$CHART_DIR" | awk '/^version:/ {print $2}')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # --password-stdin keeps the token out of the process list and the log.
+      - if: github.event_name == 'push'
+        run: echo "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Never overwrite a published tag: Flux may have pinned it. If this version is already in
+      # GHCR, the chart changed without a `version` bump; fail loudly rather than leave a green
+      # tick on a change that will never deploy.
+      #
+      # On the first run the package does not exist yet, `helm show` fails, and we carry on. A
+      # genuine auth problem would also land there, but then the push below fails, so it is
+      # not hidden.
+      - if: github.event_name == 'push'
+        env:
+          VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          if helm show chart "$REGISTRY/mp-telegram-bot" --version "$VERSION" >/dev/null 2>&1; then
+            echo "::error::chart $VERSION is already published; bump version in $CHART_DIR/Chart.yaml"
+            exit 1
+          fi
+
+      - if: github.event_name == 'push'
+        env:
+          VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          helm package "$CHART_DIR" --destination dist
+          helm push "dist/mp-telegram-bot-$VERSION.tgz" "$REGISTRY"
