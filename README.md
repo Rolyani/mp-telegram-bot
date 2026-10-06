@@ -123,8 +123,8 @@ command pointing at this repo.
 
 ## Status
 
-**Working, running locally against real Telegram and PostgreSQL, not yet deployed.** Built
-test-first in vertical slices; 100 tests, Go 1.26.
+**Deployed: running in a homelab Kubernetes cluster, installed and managed by Flux, and in daily
+use from a phone.** Built test-first in vertical slices; Go 1.27.
 
 Done:
 
@@ -139,9 +139,17 @@ Done:
   schema on first connect, so there is no migration step to run. The bot reads `DATABASE_URL`
   and refuses to start without it rather than falling back to memory and losing follows on the
   next restart.
+- **Deployment.** CI builds the container image and publishes the Helm chart to GHCR as an OCI
+  artifact (`oci://ghcr.io/rolyani/charts/mp-telegram-bot`). In the homelab, Flux pulls a pinned
+  chart version through an `OCIRepository` and installs it with a `HelmRelease`, next to the
+  namespace, the SOPS-encrypted token and the CNPG database. `/start`, `/follow` and `/latest`
+  all work against the cluster deployment.
 
 Not done:
 
-- **Deployment.** No Dockerfile, Deployment, or Flux manifests yet.
+- **Final live check.** Still waiting for a division alert that the bot sends on its own from
+  the cluster. None is expected while the Commons is in its party-conference recess: no
+  sittings means no divisions, so the first real test comes once the House returns. Also still
+  to confirm: follows survive a pod restart.
 - Written Questions and Hansard — of the three activity feeds, only Commons Votes is real.
 - Postcode lookup.
