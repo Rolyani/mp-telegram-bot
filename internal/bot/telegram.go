@@ -2,10 +2,12 @@ package bot
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,6 +25,11 @@ import (
 // accidentally print the credential too. Telegram's URL scheme invites the opposite: it
 // carries the token IN THE PATH, so a "base URL" with the token already in it looks
 // perfectly natural right up until it appears in a stack trace.
+//
+// ⚠️ Keeping the token out of OUR log lines is not enough, because http.Client puts the full
+// request URL into every transport error it returns. Every error from an HTTP call here must
+// therefore pass through redact before it is returned. Issue 31: until it did, a timed-out
+// getUpdates logged the production token.
 type Telegram struct {
 	baseURL     string
 	token       string
@@ -109,7 +116,7 @@ func (t *Telegram) SendMessage(chatID int64, text string) error {
 	// limit where a URL does. Telegram accepts both.
 	resp, err := t.client.PostForm(endpoint, values)
 	if err != nil {
-		return err
+		return t.redact(err)
 	}
 
 	defer resp.Body.Close()
@@ -154,7 +161,7 @@ func (t *Telegram) GetUpdates() ([]Update, error) {
 
 	resp, err := t.client.Get(endpoint)
 	if err != nil {
-		return nil, err
+		return nil, t.redact(err)
 	}
 
 	defer resp.Body.Close()
@@ -200,4 +207,22 @@ func (t *Telegram) GetUpdates() ([]Update, error) {
 	}
 
 	return updates, nil
+}
+
+// redact removes the token from an error returned by the HTTP client.
+//
+// The client wraps every transport failure (timeout, refused connection, DNS) in a *url.Error
+// whose message is "<method> \"<url>\": <cause>", and Telegram's URL has the token in its path.
+// Only the URL field is rewritten: the error keeps its type, so a caller can still use
+// errors.As and Timeout() to tell a timeout from anything else.
+//
+// ⚠️ An empty token is checked for rather than trusted to be impossible. telegramFromEnv refuses
+// to start without one, but strings.ReplaceAll with an empty old string inserts the replacement
+// between every character, which would turn an unhelpful error into an unreadable one.
+func (t *Telegram) redact(err error) error {
+	var urlErr *url.Error
+	if t.token != "" && errors.As(err, &urlErr) {
+		urlErr.URL = strings.ReplaceAll(urlErr.URL, t.token, "<token>")
+	}
+	return err
 }

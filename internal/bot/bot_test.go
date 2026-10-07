@@ -2927,6 +2927,63 @@ func TestTelegram_GetUpdates_sendsThePollTimeoutItWasBuiltWith(t *testing.T) {
 	}
 }
 
+// Issue 31: the token must never leave Telegram inside an error.
+//
+// This is the production failure exactly: a getUpdates that timed out on 2026-10-06 and was
+// logged by main, URL and all. http.Client wraps every transport failure in a *url.Error whose
+// message includes the request URL, and Telegram's URL carries the token IN THE PATH. So the
+// comment on the Telegram type promising that the token "cannot accidentally" reach a log line
+// was true of our code and false of the standard library's.
+//
+// ⚠️ The error must still BE a *url.Error that reports Timeout(). Removing the token by
+// flattening the error into a string would pass the first assertion and quietly destroy the
+// one thing a caller can branch on: retrying a timeout but not a 401 needs the type intact.
+func TestTelegram_GetUpdates_transportError_doesNotContainTheToken(t *testing.T) {
+	// ⚠️ LIFO: close(release) must run before srv.Close(), as in the hang test above.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	const token = "123456:SECRET-test-token"
+	tg := bot.NewTelegramPolling(srv.URL, token, 50*time.Millisecond)
+
+	_, err := tg.GetUpdates()
+	if err == nil {
+		t.Fatalf("GetUpdates returned a nil error against a server that never responded")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("GetUpdates error = %q, which contains the bot token — main logs this error, and whoever reads the log can then read every message sent to the bot and post as it", err)
+	}
+
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) || !urlErr.Timeout() {
+		t.Errorf("GetUpdates error = %#v, want a *url.Error reporting Timeout() — remove the token, not the information a caller needs to decide whether to retry", err)
+	}
+}
+
+// The same leak by the other door. SendMessage builds its URL the same way, and a refused
+// connection rather than a timeout shows the fix is not specific to one kind of failure.
+func TestTelegram_SendMessage_transportError_doesNotContainTheToken(t *testing.T) {
+	// A server that existed and has gone: its address is real, nothing is listening on it, so
+	// the connection is refused immediately.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+
+	const token = "123456:SECRET-test-token"
+	tg := bot.NewTelegram(srv.URL, token)
+
+	err := tg.SendMessage(4242, "hello")
+	if err == nil {
+		t.Fatalf("SendMessage returned a nil error against a server that is not listening")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("SendMessage error = %q, which contains the bot token", err)
+	}
+}
+
 // Issue 29, slice 3a: a hung Parliament no longer takes the bot with it.
 //
 // Same zero-Timeout http.Client as the Telegram one, same single goroutine, and the fix is the
