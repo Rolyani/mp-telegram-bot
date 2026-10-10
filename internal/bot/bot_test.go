@@ -1833,6 +1833,40 @@ func TestHandleUpdate_bareNameCommand_promptShowsTheFullForm(t *testing.T) {
 	}
 }
 
+// Issue 35B, slice 1: answering the bare /follow prompt with just a name follows that MP. The
+// bot keeps no record of having asked: Telegram hands back the text of the message being
+// replied to, and the bot recognises its own prompt by it. The prompt is captured
+// behaviourally rather than hardcoded, so 35A's test stays the one place that pins its wording.
+//
+// A reply that is itself a command is handled as typed, not prefixed: someone answering the
+// prompt with "/follow Andy Burnham" means exactly that, and prefixing would search for an MP
+// called "/follow Andy Burnham".
+func TestHandleUpdate_replyToFollowPrompt_followsTheNamedMP(t *testing.T) {
+	const mp = "Andy Burnham"
+
+	for _, text := range []string{mp, "/follow " + mp} {
+		t.Run(text, func(t *testing.T) {
+			store := bot.NewMemoryStore()
+			b := bot.New(store, knownMPs(mp), fakeSource{})
+
+			prompt, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: "/follow"})
+			if err != nil {
+				t.Fatalf("HandleUpdate(/follow) returned error: %v", err)
+			}
+
+			_, err = b.HandleUpdate(bot.Update{ChatID: 5, Text: text, ReplyTo: prompt.Text})
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q as a reply to the prompt) returned error: %v", text, err)
+			}
+
+			got := storeFollows(t, store, 5)
+			if len(got) != 1 || got[0].Name != mp {
+				t.Errorf("store.Follows(5) = %v, want exactly %s", got, mp)
+			}
+		})
+	}
+}
+
 // Slice 16 (Phase A, static commands): /help returns a reply addressed to the chat with
 // its own help text. The point of the slice is that /help is genuinely dispatched to its
 // own case, not swallowed by the default fallback — so we capture the default reply

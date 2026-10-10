@@ -9,8 +9,9 @@ import (
 
 // Update represents an incoming message
 type Update struct {
-	ChatID int64
-	Text   string
+	ChatID  int64
+	Text    string
+	ReplyTo string
 }
 
 // Reply is what HandleUpdate returns
@@ -329,6 +330,11 @@ func reply(chatID int64, text string) Reply {
 	return Reply{ChatID: chatID, Text: text}
 }
 
+// followPrompt answers a bare /follow. Named once because HandleUpdate also matches replies
+// against it (issue 35B): if the two copies drifted apart, replies to the prompt would quietly
+// stop being recognised.
+const followPrompt = "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"
+
 // apiDown is what every command says when the Members API cannot be reached. Named once
 // because it is one statement about one outage: /find and /follow both make the same
 // request and both fail the same way, and rewording it in only one of them would have the
@@ -382,6 +388,13 @@ func matchingFollows(follows []Member, fragment string) []Member {
 // retry on — and both are served in one call. Callers must therefore send the Reply
 // before deciding what to do about the error, not return early on it.
 func (b *Bot) HandleUpdate(update Update) (Reply, error) {
+	// A reply to the bare /follow prompt is the name it asked for (issue 35B). Telegram hands
+	// back the text of the message being replied to, so the bot recognises its own prompt by
+	// that text and keeps no record of having asked. A reply that is itself a command is
+	// handled as typed: prefixing "/follow Andy Burnham" would search for an MP of that name.
+	if update.ReplyTo == followPrompt && !strings.HasPrefix(update.Text, "/") {
+		update.Text = "/follow " + update.Text
+	}
 	cmd, arg, _ := strings.Cut(update.Text, " ")
 	switch cmd {
 	case "/start":
@@ -419,7 +432,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/follow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"), nil
+			return reply(update.ChatID, followPrompt), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
