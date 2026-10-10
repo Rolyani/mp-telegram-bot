@@ -336,12 +336,14 @@ func reply(chatID int64, text string) Reply {
 const (
 	followPrompt   = "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"
 	unfollowPrompt = "Send /unfollow followed by the MP's name, e.g. /unfollow Andy Burnham"
+	findPrompt     = "Send /find followed by a name to search for, e.g. /find Burnham"
 )
 
 // promptCommands maps each prompt to the command that an answer to it completes.
 var promptCommands = map[string]string{
 	followPrompt:   "/follow",
 	unfollowPrompt: "/unfollow",
+	findPrompt:     "/find",
 }
 
 // apiDown is what every command says when the Members API cannot be reached. Named once
@@ -421,7 +423,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/find":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Send /find followed by a name to search for, e.g. /find Burnham"), nil
+			return reply(update.ChatID, findPrompt), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {

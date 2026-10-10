@@ -1901,6 +1901,40 @@ func TestHandleUpdate_replyToUnfollowPrompt_unfollowsTheNamedMP(t *testing.T) {
 	}
 }
 
+// Issue 35B, slice 1 finished: the same for /find. /find changes nothing in the store, so the
+// observable result is the reply itself, and the test asserts it is the very reply that typing
+// the full command gets. That keeps /find's wording free to change without touching this test.
+func TestHandleUpdate_replyToFindPrompt_answersAsFindWould(t *testing.T) {
+	const query = "Burnham"
+	resolver := &fakeResolver{matches: map[string][]bot.Member{
+		query: {{ID: 100, Name: "Andy Burnham"}},
+	}}
+
+	for _, text := range []string{query, "/find " + query} {
+		t.Run(text, func(t *testing.T) {
+			b := bot.New(bot.NewMemoryStore(), resolver, fakeSource{})
+
+			want, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: "/find " + query})
+			if err != nil {
+				t.Fatalf("HandleUpdate(/find %s) returned error: %v", query, err)
+			}
+			prompt, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: "/find"})
+			if err != nil {
+				t.Fatalf("HandleUpdate(/find) returned error: %v", err)
+			}
+
+			got, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: text, ReplyTo: prompt.Text})
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q as a reply to the prompt) returned error: %v", text, err)
+			}
+
+			if got.Text != want.Text {
+				t.Errorf("reply to the /find prompt = %q, want what /find %s says: %q", got.Text, query, want.Text)
+			}
+		})
+	}
+}
+
 // Slice 16 (Phase A, static commands): /help returns a reply addressed to the chat with
 // its own help text. The point of the slice is that /help is genuinely dispatched to its
 // own case, not swallowed by the default fallback — so we capture the default reply
