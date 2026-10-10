@@ -1867,6 +1867,40 @@ func TestHandleUpdate_replyToFollowPrompt_followsTheNamedMP(t *testing.T) {
 	}
 }
 
+// Issue 35B, slice 1 continued: the same for /unfollow. The chat follows two MPs so the test
+// can tell "unfollowed the one named" from "unfollowed everything" or "did nothing". The
+// command-as-reply case is here too, guarding against the double prefix as /follow's test does.
+func TestHandleUpdate_replyToUnfollowPrompt_unfollowsTheNamedMP(t *testing.T) {
+	const mp, other = "Andy Burnham", "Diane Abbott"
+
+	for _, text := range []string{mp, "/unfollow " + mp} {
+		t.Run(text, func(t *testing.T) {
+			store := bot.NewMemoryStore()
+			b := bot.New(store, knownMPs(mp, other), fakeSource{})
+			for _, name := range []string{mp, other} {
+				if _, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: "/follow " + name}); err != nil {
+					t.Fatalf("HandleUpdate(/follow %s) returned error: %v", name, err)
+				}
+			}
+
+			prompt, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: "/unfollow"})
+			if err != nil {
+				t.Fatalf("HandleUpdate(/unfollow) returned error: %v", err)
+			}
+
+			_, err = b.HandleUpdate(bot.Update{ChatID: 5, Text: text, ReplyTo: prompt.Text})
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q as a reply to the prompt) returned error: %v", text, err)
+			}
+
+			got := storeFollows(t, store, 5)
+			if len(got) != 1 || got[0].Name != other {
+				t.Errorf("store.Follows(5) = %v, want exactly %s", got, other)
+			}
+		})
+	}
+}
+
 // Slice 16 (Phase A, static commands): /help returns a reply addressed to the chat with
 // its own help text. The point of the slice is that /help is genuinely dispatched to its
 // own case, not swallowed by the default fallback — so we capture the default reply

@@ -330,10 +330,19 @@ func reply(chatID int64, text string) Reply {
 	return Reply{ChatID: chatID, Text: text}
 }
 
-// followPrompt answers a bare /follow. Named once because HandleUpdate also matches replies
-// against it (issue 35B): if the two copies drifted apart, replies to the prompt would quietly
-// stop being recognised.
-const followPrompt = "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"
+// The prompts that answer a command sent without its name. Each is named once because
+// HandleUpdate also matches replies against it (issue 35B): if the reply and the match held
+// separate copies, a one-letter difference would quietly stop replies being recognised.
+const (
+	followPrompt   = "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"
+	unfollowPrompt = "Send /unfollow followed by the MP's name, e.g. /unfollow Andy Burnham"
+)
+
+// promptCommands maps each prompt to the command that an answer to it completes.
+var promptCommands = map[string]string{
+	followPrompt:   "/follow",
+	unfollowPrompt: "/unfollow",
+}
 
 // apiDown is what every command says when the Members API cannot be reached. Named once
 // because it is one statement about one outage: /find and /follow both make the same
@@ -388,12 +397,12 @@ func matchingFollows(follows []Member, fragment string) []Member {
 // retry on — and both are served in one call. Callers must therefore send the Reply
 // before deciding what to do about the error, not return early on it.
 func (b *Bot) HandleUpdate(update Update) (Reply, error) {
-	// A reply to the bare /follow prompt is the name it asked for (issue 35B). Telegram hands
-	// back the text of the message being replied to, so the bot recognises its own prompt by
-	// that text and keeps no record of having asked. A reply that is itself a command is
-	// handled as typed: prefixing "/follow Andy Burnham" would search for an MP of that name.
-	if update.ReplyTo == followPrompt && !strings.HasPrefix(update.Text, "/") {
-		update.Text = "/follow " + update.Text
+	// A reply to a name prompt is the name it asked for (issue 35B). Telegram hands back the
+	// text of the message being replied to, so the bot recognises its own prompt by that text
+	// and keeps no record of having asked. A reply that is itself a command is handled as
+	// typed: prefixing "/follow Andy Burnham" would search for an MP of that name.
+	if command, ok := promptCommands[update.ReplyTo]; ok && !strings.HasPrefix(update.Text, "/") {
+		update.Text = command + " " + update.Text
 	}
 	cmd, arg, _ := strings.Cut(update.Text, " ")
 	switch cmd {
@@ -474,7 +483,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Send /unfollow followed by the MP's name, e.g. /unfollow Andy Burnham"), nil
+			return reply(update.ChatID, unfollowPrompt), nil
 		}
 		follows, err := b.store.Follows(update.ChatID)
 		if err != nil {
