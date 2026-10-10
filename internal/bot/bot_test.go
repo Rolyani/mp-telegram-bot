@@ -1935,6 +1935,39 @@ func TestHandleUpdate_replyToFindPrompt_answersAsFindWould(t *testing.T) {
 	}
 }
 
+// Issue 35B, slice 2: only the name prompts ask Telegram to open a reply box. Slice 1 handles
+// a reply to a prompt, but nobody replies to a message unprompted; ForceReply is what makes the
+// phone open a reply to it. Every other reply must leave it off: a forced reply box on "Now
+// following Andy Burnham." or on the fallback would turn whatever the user types next into a
+// reply to it, for no reason.
+func TestHandleUpdate_onlyNamePromptsForceAReply(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"/find", true},
+		{"/follow", true},
+		{"/unfollow", true},
+		{"/follow Andy Burnham", false},
+		{"/help", false},
+		{"Andy Burnham", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.text, func(t *testing.T) {
+			b := bot.New(bot.NewMemoryStore(), knownMPs("Andy Burnham"), fakeSource{})
+
+			reply, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: tt.text})
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q) returned error: %v", tt.text, err)
+			}
+
+			if reply.ForceReply != tt.want {
+				t.Errorf("HandleUpdate(%q).ForceReply = %v, want %v", tt.text, reply.ForceReply, tt.want)
+			}
+		})
+	}
+}
+
 // Slice 16 (Phase A, static commands): /help returns a reply addressed to the chat with
 // its own help text. The point of the slice is that /help is genuinely dispatched to its
 // own case, not swallowed by the default fallback — so we capture the default reply

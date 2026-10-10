@@ -29,6 +29,12 @@ type Reply struct {
 	//
 	// Empty for every reply that asks nothing.
 	Choices []string
+
+	// ForceReply has Telegram open a reply box on this message, so that whatever the user
+	// sends next comes back as a reply to it, with ReplyTo set. Only the name prompts set it
+	// (see prompt): on any other reply it would quietly make the user's next message a reply
+	// to something that never asked a question.
+	ForceReply bool
 }
 
 // MemoryStore remembers chat IDs
@@ -330,6 +336,14 @@ func reply(chatID int64, text string) Reply {
 	return Reply{ChatID: chatID, Text: text}
 }
 
+// prompt is reply for the one kind of answer that asks the user for a name: it also has
+// Telegram open a reply box on the message, so that the name comes back with ReplyTo set
+// (issue 35B). A separate helper rather than a bool on reply, so that every other branch
+// stays reply(chatID, text) and this one says what it is.
+func prompt(chatID int64, text string) Reply {
+	return Reply{ChatID: chatID, Text: text, ForceReply: true}
+}
+
 // The prompts that answer a command sent without its name. Each is named once because
 // HandleUpdate also matches replies against it (issue 35B): if the reply and the match held
 // separate copies, a one-letter difference would quietly stop replies being recognised.
@@ -423,7 +437,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/find":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, findPrompt), nil
+			return prompt(update.ChatID, findPrompt), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
@@ -443,7 +457,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/follow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, followPrompt), nil
+			return prompt(update.ChatID, followPrompt), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
@@ -485,7 +499,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, unfollowPrompt), nil
+			return prompt(update.ChatID, unfollowPrompt), nil
 		}
 		follows, err := b.store.Follows(update.ChatID)
 		if err != nil {
