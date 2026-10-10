@@ -399,7 +399,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/find":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Please enter an MP's name to search for."), nil
+			return reply(update.ChatID, "Send /find followed by a name to search for, e.g. /find Burnham"), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
@@ -419,7 +419,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/follow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Please enter an MP's name to follow."), nil
+			return reply(update.ChatID, "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
@@ -461,7 +461,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Please enter an MP's name to unfollow."), nil
+			return reply(update.ChatID, "Send /unfollow followed by the MP's name, e.g. /unfollow Andy Burnham"), nil
 		}
 		follows, err := b.store.Follows(update.ChatID)
 		if err != nil {
@@ -540,7 +540,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/source":
 		return reply(update.ChatID, "Full code available at: https://github.com/Rolyani/mp-telegram-bot"), nil
 	default:
-		return reply(update.ChatID, "Use /start to begin."), nil
+		return reply(update.ChatID, "Sorry, I didn't understand that. Send /help to see what I can do."), nil
 	}
 }
 

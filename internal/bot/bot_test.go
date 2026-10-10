@@ -1774,6 +1774,65 @@ func TestHandleUpdate_unknownMessage_notRecordedAndDistinctReply(t *testing.T) {
 	}
 }
 
+// Issue 34: the fallback is the reply people see most, and twice now it has told them to do
+// something that was not true for them ("Use /start to begin." to users who already had). So
+// the wording is pinned exactly here, unlike most replies: changing it should be a decision,
+// made in this test, not a side effect. It has to hold for everyone who can reach it: plain
+// text, an unknown command, and the empty Text that stickers, photos and edits arrive with.
+func TestHandleUpdate_unrecognisedInput_pointsAtHelp(t *testing.T) {
+	const want = "Sorry, I didn't understand that. Send /help to see what I can do."
+
+	for _, text := range []string{"Andy Burnham", "/nosuchcommand", ""} {
+		t.Run(text, func(t *testing.T) {
+			store := bot.NewMemoryStore()
+			// Already subscribed: the user issue 34 was found with.
+			if err := store.AddChat(5); err != nil {
+				t.Fatalf("AddChat(5): %v", err)
+			}
+			b := bot.New(store, nil, nil)
+
+			reply, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: text})
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
+			}
+
+			if reply.Text != want {
+				t.Errorf("HandleUpdate(%q).Text = %q, want %q", text, reply.Text, want)
+			}
+		})
+	}
+}
+
+// Issue 35A: tapping a command in Telegram's menu sends it bare. The prompt that answers it is
+// how a phone user learns the command takes a name at all, so it shows the whole form with a
+// worked example. "Please enter an MP's name" read as "send me a name", and the name alone
+// then got the fallback. Pinned exactly, as the fallback is: each sentence is an instruction a
+// user will follow literally.
+func TestHandleUpdate_bareNameCommand_promptShowsTheFullForm(t *testing.T) {
+	tests := []struct {
+		text string
+		want string
+	}{
+		{"/find", "Send /find followed by a name to search for, e.g. /find Burnham"},
+		{"/follow", "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"},
+		{"/unfollow", "Send /unfollow followed by the MP's name, e.g. /unfollow Andy Burnham"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.text, func(t *testing.T) {
+			b := bot.New(bot.NewMemoryStore(), nil, fakeSource{})
+
+			reply, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: tt.text})
+			if err != nil {
+				t.Fatalf("HandleUpdate(%q) returned error: %v", tt.text, err)
+			}
+
+			if reply.Text != tt.want {
+				t.Errorf("HandleUpdate(%q).Text = %q, want %q", tt.text, reply.Text, tt.want)
+			}
+		})
+	}
+}
+
 // Slice 16 (Phase A, static commands): /help returns a reply addressed to the chat with
 // its own help text. The point of the slice is that /help is genuinely dispatched to its
 // own case, not swallowed by the default fallback — so we capture the default reply
