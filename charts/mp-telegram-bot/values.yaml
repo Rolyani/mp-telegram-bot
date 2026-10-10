@@ -4,7 +4,7 @@
 
 image:
   repository: ghcr.io/rolyani/mp-telegram-bot
-  tag: "sha-34cc2e6"
+  tag: "sha-41afd40"
 
 telegram:
   secretName: mp-telegram-bot-token
