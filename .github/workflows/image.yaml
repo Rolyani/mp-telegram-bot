@@ -2,6 +2,7 @@ name: image # display name
 
 # On these two events run the workflow.
 on:
+  pull_request: # a pull request, runs the tests only
   push:
     branches: [main] # a push to main
     tags: ["v*"] # pushing a tag starting with v
@@ -52,6 +53,7 @@ jobs:
 
   build:
     needs: test # wait for the test job to finish and pass
+    if: github.event_name == 'push' # never build or publish an image from a pull request
     runs-on: ubuntu-24.04
 
     # set GitHub token permissions
