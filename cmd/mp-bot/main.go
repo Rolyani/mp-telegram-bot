@@ -35,6 +35,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -109,7 +110,7 @@ func main() {
 	// poll until Telegram has something to say, so calling it back to back IS the pacing.
 	go func() {
 		for {
-			if err := pollOnce(b, tg); err != nil {
+			if err := pollOnce(b, tg, os.Stdout); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				// ⚠️ Only on the error path, and it is not cosmetic. A failing GetUpdates
 				// returns immediately, so without this the loop spins. See pollErrorBackoff.
@@ -146,7 +147,10 @@ func main() {
 // rather than tidy. Its two return values are not either/or: a lookup that failed still carries
 // the sentence explaining so, and returning early would answer that user with silence. See the
 // doc comment on HandleUpdate.
-func pollOnce(b *bot.Bot, tg *bot.Telegram) error {
+//
+// Each update is logged to log as one line before it is handled (issue 33): the chat ID and
+// the command word, never the text. See describe.
+func pollOnce(b *bot.Bot, tg *bot.Telegram, log io.Writer) error {
 	updates, err := tg.GetUpdates()
 	if err != nil {
 		return err
@@ -154,8 +158,9 @@ func pollOnce(b *bot.Bot, tg *bot.Telegram) error {
 
 	var failures []error
 	for _, update := range updates {
+		fmt.Fprintln(log, describe(update))
 		reply, err := b.HandleUpdate(update)
-		if sendErr := tg.SendMessage(reply.ChatID, reply.Text); sendErr != nil {
+		if sendErr := tg.SendMessage(reply); sendErr != nil {
 			failures = append(failures, sendErr)
 		}
 		if err != nil {
@@ -164,6 +169,23 @@ func pollOnce(b *bot.Bot, tg *bot.Telegram) error {
 	}
 
 	return errors.Join(failures...)
+}
+
+// describe is the log line for one update: who sent it and which command it was handled as.
+//
+// ⚠️ Never the text. Arguments are free text a user typed, and /privacy says the bot stores only
+// the MPs you choose; a log is storage. A fallback says only whether there was any text, since a
+// sticker or photo arrives with none. A chat ID is still data about a user that /forgetme does
+// not erase from the logs, which the /privacy wording has to allow for.
+func describe(update bot.Update) string {
+	if cmd := bot.Command(update); cmd != "" {
+		return fmt.Sprintf("chat %d: %s", update.ChatID, cmd)
+	}
+	kind := "text"
+	if update.Text == "" {
+		kind = "empty"
+	}
+	return fmt.Sprintf("chat %d: %s, unknown command", update.ChatID, kind)
 }
 
 // pushOnce runs one push cycle: it asks the bot what its followers have not been told yet and
@@ -199,7 +221,7 @@ func pushOnce(b *bot.Bot, tg *bot.Telegram) error {
 
 	var failures []error
 	for _, reply := range replies {
-		if sendErr := tg.SendMessage(reply.ChatID, reply.Text); sendErr != nil {
+		if sendErr := tg.SendMessage(reply); sendErr != nil {
 			failures = append(failures, sendErr)
 		}
 	}

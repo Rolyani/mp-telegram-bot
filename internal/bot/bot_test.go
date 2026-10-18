@@ -1,6 +1,7 @@
 package bot_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -2583,7 +2584,7 @@ func TestTelegram_SendMessage_sendsTheChatIDAndTextToTheAPI(t *testing.T) {
 	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
 
 	wantText := "Voted No on: Public Office (Accountability) Bill"
-	if err := tg.SendMessage(4242, wantText); err != nil {
+	if err := tg.SendMessage(bot.Reply{ChatID: 4242, Text: wantText}); err != nil {
 		t.Fatalf("SendMessage returned error: %v", err)
 	}
 
@@ -2601,6 +2602,85 @@ func TestTelegram_SendMessage_sendsTheChatIDAndTextToTheAPI(t *testing.T) {
 
 	if gotText != wantText {
 		t.Errorf("SendMessage sent text=%q, want %q", gotText, wantText)
+	}
+}
+
+// Issue 35B-4: the reply's markup reaches Telegram.
+//
+// ForceReply is what makes Telegram send the user's answer back as a reply to the prompt,
+// with reply_to_message set; Choices become a reply keyboard, where tapping a button sends
+// its text (issue 17). Both are carried in one reply_markup field, a JSON document inside a
+// form value, so the test decodes it rather than comparing strings that differ only in
+// spacing. A reply with neither must send no reply_markup at all: an empty or stale one
+// would close a keyboard or open a reply box nobody asked for.
+func TestTelegram_SendMessage_sendsTheReplyMarkup(t *testing.T) {
+	type button struct {
+		Text string `json:"text"`
+	}
+	type markup struct {
+		ForceReply      bool       `json:"force_reply"`
+		Keyboard        [][]button `json:"keyboard"`
+		OneTimeKeyboard bool       `json:"one_time_keyboard"`
+	}
+
+	tests := []struct {
+		name  string
+		reply bot.Reply
+		want  *markup // nil: no reply_markup sent at all
+	}{
+		{
+			name:  "plain reply sends none",
+			reply: bot.Reply{ChatID: 4242, Text: "Your details have been removed."},
+		},
+		{
+			name:  "prompt forces a reply",
+			reply: bot.Reply{ChatID: 4242, Text: "Send /follow followed by the MP's name, e.g. /follow Andy Burnham", ForceReply: true},
+			want:  &markup{ForceReply: true},
+		},
+		{
+			name: "choices become a one-time keyboard, one button per row",
+			reply: bot.Reply{ChatID: 4242, Text: "Which one?", Choices: []string{
+				"/follow John Smith", "/follow Jane Smith",
+			}},
+			want: &markup{
+				Keyboard:        [][]button{{{Text: "/follow John Smith"}}, {{Text: "/follow Jane Smith"}}},
+				OneTimeKeyboard: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotMarkup string
+			var sent bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				gotMarkup = r.PostForm.Get("reply_markup")
+				_, sent = r.PostForm["reply_markup"]
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
+			}))
+			defer srv.Close()
+
+			tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+			if err := tg.SendMessage(tt.reply); err != nil {
+				t.Fatalf("SendMessage returned error: %v", err)
+			}
+
+			if tt.want == nil {
+				if sent {
+					t.Errorf("SendMessage sent reply_markup=%q, want none", gotMarkup)
+				}
+				return
+			}
+
+			var got markup
+			if err := json.Unmarshal([]byte(gotMarkup), &got); err != nil {
+				t.Fatalf("reply_markup=%q is not JSON: %v", gotMarkup, err)
+			}
+			if !reflect.DeepEqual(got, *tt.want) {
+				t.Errorf("reply_markup = %+v, want %+v (raw %s)", got, *tt.want, gotMarkup)
+			}
+		})
 	}
 }
 
@@ -2630,7 +2710,7 @@ func TestTelegram_SendMessage_blockedByUser_returnsError(t *testing.T) {
 
 	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
 
-	err := tg.SendMessage(4242, "hello")
+	err := tg.SendMessage(bot.Reply{ChatID: 4242, Text: "hello"})
 	if err == nil {
 		t.Fatalf("SendMessage returned a nil error, want one — a 403 means the message was NOT delivered")
 	}
@@ -2705,6 +2785,58 @@ func TestTelegram_GetUpdates_parsesTelegramsPayloadIntoUpdates(t *testing.T) {
 	// Compared whole rather than field by field. bot.Update is two comparable fields, so ==
 	// works, and comparing the whole value means a third field added later is checked here
 	// for free instead of being quietly ignored by an assertion that names two.
+	for i, w := range want {
+		if updates[i] != w {
+			t.Errorf("updates[%d] = %+v, want %+v", i, updates[i], w)
+		}
+	}
+}
+
+// Issue 35B-3: a reply to the bot's prompt carries the prompt's text into Update.ReplyTo.
+//
+// Telegram nests the message being replied to INSIDE the reply, as reply_to_message, and
+// that is the only place the prompt's text arrives. HandleUpdate already knows what to do
+// with ReplyTo; until GetUpdates fills it in, a user answering "Andy Burnham" to the
+// /follow prompt gets the fallback instead.
+//
+// ⚠️ The underscores in reply_to_message defeat encoding/json's case-insensitive matching,
+// the same trap as update_id: an untagged field stays empty with no error. The payload is
+// real-shaped so that is what the test catches. The second update is an ordinary message,
+// so ReplyTo must stay empty rather than leak from the first.
+func TestTelegram_GetUpdates_aReplyCarriesTheTextItRepliesTo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ok":true,"result":[
+			{"update_id":870123456,"message":{"message_id":14,
+				"from":{"id":4242,"is_bot":false,"first_name":"Ian"},
+				"chat":{"id":4242,"first_name":"Ian","type":"private"},
+				"date":1756600000,"text":"Andy Burnham",
+				"reply_to_message":{"message_id":13,
+					"from":{"id":777,"is_bot":true,"first_name":"MP Bot"},
+					"chat":{"id":4242,"first_name":"Ian","type":"private"},
+					"date":1756599990,
+					"text":"Send /follow followed by the MP's name, e.g. /follow Andy Burnham"}}},
+			{"update_id":870123457,"message":{"message_id":15,
+				"from":{"id":4242,"is_bot":false,"first_name":"Ian"},
+				"chat":{"id":4242,"first_name":"Ian","type":"private"},
+				"date":1756600060,"text":"/list"}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+
+	updates, err := tg.GetUpdates()
+	if err != nil {
+		t.Fatalf("GetUpdates returned error: %v", err)
+	}
+
+	want := []bot.Update{
+		{ChatID: 4242, Text: "Andy Burnham", ReplyTo: "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"},
+		{ChatID: 4242, Text: "/list"},
+	}
+	if len(updates) != len(want) {
+		t.Fatalf("GetUpdates returned %d updates, want %d: %+v", len(updates), len(want), updates)
+	}
 	for i, w := range want {
 		if updates[i] != w {
 			t.Errorf("updates[%d] = %+v, want %+v", i, updates[i], w)
@@ -3169,7 +3301,7 @@ func TestTelegram_SendMessage_transportError_doesNotContainTheToken(t *testing.T
 	const token = "123456:SECRET-test-token"
 	tg := bot.NewTelegram(srv.URL, token)
 
-	err := tg.SendMessage(4242, "hello")
+	err := tg.SendMessage(bot.Reply{ChatID: 4242, Text: "hello"})
 	if err == nil {
 		t.Fatalf("SendMessage returned a nil error against a server that is not listening")
 	}
@@ -3517,5 +3649,125 @@ func TestMemoryStore_follows_areOrderedByName(t *testing.T) {
 	want := []bot.Member{abbott, zahawi}
 	if !reflect.DeepEqual(follows, want) {
 		t.Errorf("Follows(%d) = %+v, want %+v — the two stores must order a follow list the same way, or /unfollow numbers it differently depending on which store Bot happens to hold", chatID, follows, want)
+	}
+}
+
+// Issue 33: Command is what the poll loop logs, so it must recognise every command the bot
+// answers. Its list sits beside HandleUpdate's switch, and /help is the bot's own statement of
+// what that switch handles, so each command /help names must come back as itself. A command
+// added to the switch and /help but not to the list would be logged as "unknown".
+func TestCommand_recognisesEveryCommandInHelp(t *testing.T) {
+	b := bot.New(bot.NewMemoryStore(), nil, nil)
+	help, err := b.HandleUpdate(bot.Update{ChatID: 1, Text: "/help"})
+	if err != nil {
+		t.Fatalf("/help returned error: %v", err)
+	}
+
+	var seen int
+	for _, line := range strings.Split(help.Text, "\n") {
+		word, _, _ := strings.Cut(line, " ")
+		if !strings.HasPrefix(word, "/") {
+			continue
+		}
+		seen++
+		if got := bot.Command(bot.Update{Text: word}); got != word {
+			t.Errorf("Command(%q) = %q, want %q", word, got, word)
+		}
+	}
+	if seen == 0 {
+		t.Fatalf("found no commands in the /help text:\n%s", help.Text)
+	}
+
+	if got := bot.Command(bot.Update{Text: "Andy Burnham"}); got != "" {
+		t.Errorf("Command(%q) = %q, want \"\" for plain text", "Andy Burnham", got)
+	}
+}
+
+// Issue 32: a command with an @botname suffix, or capitalised by a phone, is still the command.
+//
+// Telegram sends /start@BotName from a group's command menu, and phones auto-capitalise a
+// first word into /Start. Both used to fall through to the fallback. Telegram command names
+// are lowercase only, so neither can mean anything else.
+//
+// ⚠️ Only the command word is normalised. The argument is an MP's name and goes to the
+// resolver exactly as typed, which is what the /FIND case pins: lowercasing the whole text
+// would turn "Andy Burnham" into "andy burnham".
+//
+// Any suffix is stripped, not only this bot's. That is a decision, not an oversight: the bot is
+// used in direct chats, and matching its own name needs getMe at startup. In a group shared
+// with another bot, a command addressed to that bot would be answered here as well.
+func TestHandleUpdate_commandWord_ignoresBotSuffixAndCase(t *testing.T) {
+	for _, text := range []string{"/start@MPBot", "/Start", "/START@mp_bot"} {
+		store := bot.NewMemoryStore()
+		b := bot.New(store, nil, nil)
+		got, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: text})
+		if err != nil {
+			t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
+		}
+		if got.Text != "Welcome! Please follow MPs to recieve updates." {
+			t.Errorf("HandleUpdate(%q) replied %q, want the /start welcome", text, got.Text)
+		}
+		if bot.Command(bot.Update{Text: text}) != "/start" {
+			t.Errorf("Command(%q) = %q, want %q", text, bot.Command(bot.Update{Text: text}), "/start")
+		}
+	}
+
+	resolver := &fakeResolver{}
+	b := bot.New(bot.NewMemoryStore(), resolver, nil)
+	if _, err := b.HandleUpdate(bot.Update{ChatID: 5, Text: "/FIND@MPBot Andy Burnham"}); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if len(resolver.calls) != 1 || resolver.calls[0] != "Andy Burnham" {
+		t.Errorf("resolver asked for %q, want exactly [\"Andy Burnham\"] — the argument must reach it as typed", resolver.calls)
+	}
+}
+
+// Issue 36: a push names the MP who voted.
+//
+// The first real push (2026-10-13) arrived as "Voted Aye on: …" with no name, and someone
+// following several MPs cannot tell whose vote it is. The source's text deliberately leaves the
+// name out (see ActivitySource), so CheckActivity, which holds the Member, adds it. Same
+// "Name: text" form as /latest, so the two read alike.
+func TestCheckActivity_pushNamesTheMP(t *testing.T) {
+	store := bot.NewMemoryStore()
+	store.AddChat(1)
+	store.FollowMP(1, bot.Member{ID: 4514, Name: "Andy Burnham"})
+
+	source := fakeSource{items: map[int][]bot.Activity{
+		4514: {{ID: "v42", Text: "Voted Aye on: Public Office (Accountability) Bill"}},
+	}}
+
+	replies := checkActivity(t, bot.New(store, nil, source))
+
+	if len(replies) != 1 {
+		t.Fatalf("got %d replies, want 1: %+v", len(replies), replies)
+	}
+	want := "Andy Burnham: Voted Aye on: Public Office (Accountability) Bill"
+	if replies[0].Text != want {
+		t.Errorf("push text = %q, want %q", replies[0].Text, want)
+	}
+}
+
+// Issue 33's follow-up: /privacy must describe what the bot actually keeps, now that the logs
+// hold a line per message. The old notice said "only the MPs you select", which was already
+// short of the truth (the chat ID is stored too) and became wrong once chat IDs were logged.
+//
+// Pinned as facts rather than sentences, so the wording stays free: it must name the chat ID,
+// the logs, and that /forgetme does not reach them. Telling someone their data is wiped while
+// a log line about them remains is the thing COMPLIANCE.md's transparency point rules out.
+func TestHandleUpdate_privacy_statesWhatIsStoredAndLogged(t *testing.T) {
+	b := bot.New(bot.NewMemoryStore(), nil, nil)
+	reply, err := b.HandleUpdate(bot.Update{ChatID: 7, Text: "/privacy"})
+	if err != nil {
+		t.Fatalf("HandleUpdate(/privacy) returned error: %v", err)
+	}
+
+	for _, fact := range []string{"chat ID", "MPs you follow", "logs", "/forgetme", "never what you typed"} {
+		if !strings.Contains(reply.Text, fact) {
+			t.Errorf("/privacy reply does not mention %q:\n%s", fact, reply.Text)
+		}
+	}
+	if strings.Contains(reply.Text, "No other personal information") {
+		t.Errorf("/privacy still claims nothing else is collected:\n%s", reply.Text)
 	}
 }
