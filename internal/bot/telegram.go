@@ -106,10 +106,21 @@ func NewTelegram(baseURL, token string) *Telegram {
 // Note that chat_id is snake_case: it is a name on Telegram's wire, not a Go identifier,
 // and their API is snake_case throughout. The Go parameter is chatID, as Go's own
 // convention requires. The two conventions meet on exactly one line, below.
-func (t *Telegram) SendMessage(chatID int64, text string) error {
+//
+// reply_markup carries the rest of the Reply (issue 35B-4). Telegram takes one markup per
+// message, so Choices win over ForceReply: a keyboard already answers the question, and no
+// reply sets both today. A reply with neither sends no markup at all.
+func (t *Telegram) SendMessage(reply Reply) error {
 	values := url.Values{}
-	values.Set("chat_id", strconv.FormatInt(chatID, 10))
-	values.Set("text", text)
+	values.Set("chat_id", strconv.FormatInt(reply.ChatID, 10))
+	values.Set("text", reply.Text)
+	markup, err := replyMarkup(reply)
+	if err != nil {
+		return err
+	}
+	if markup != "" {
+		values.Set("reply_markup", markup)
+	}
 	endpoint := t.baseURL + "/bot" + t.token + "/sendMessage"
 
 	// POST rather than GET: a reply can run to 4096 characters, and a body has no length
@@ -126,6 +137,42 @@ func (t *Telegram) SendMessage(chatID int64, text string) error {
 	}
 
 	return nil
+}
+
+// replyMarkup renders the Reply's keyboard or reply box as the JSON Telegram expects in
+// reply_markup, or "" when the reply has neither.
+//
+// Each choice is its own row, so a long MP's name gets the full width rather than sharing it.
+// one_time_keyboard hides the keyboard once a button is tapped; without it the choices from
+// one ambiguous /follow would sit under every later message.
+func replyMarkup(reply Reply) (string, error) {
+	type button struct {
+		Text string `json:"text"`
+	}
+	var markup any
+	switch {
+	case len(reply.Choices) > 0:
+		rows := make([][]button, 0, len(reply.Choices))
+		for _, c := range reply.Choices {
+			rows = append(rows, []button{{Text: c}})
+		}
+		markup = struct {
+			Keyboard        [][]button `json:"keyboard"`
+			OneTimeKeyboard bool       `json:"one_time_keyboard"`
+			ResizeKeyboard  bool       `json:"resize_keyboard"`
+		}{rows, true, true}
+	case reply.ForceReply:
+		markup = struct {
+			ForceReply bool `json:"force_reply"`
+		}{true}
+	default:
+		return "", nil
+	}
+	encoded, err := json.Marshal(markup)
+	if err != nil {
+		return "", fmt.Errorf("reply markup: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // GetUpdates fetches the messages waiting for the bot and returns them in the flat shape the
@@ -178,6 +225,9 @@ func (t *Telegram) GetUpdates() ([]Update, error) {
 	// exactly, then case-insensitively, which is why Chat/chat and Text/text bind with no tag —
 	// but the underscore in update_id defeats that, and an untagged UpdateID would stay 0 with
 	// NO error reported. Note also that it sits ALONGSIDE message on the wire, not inside it.
+	// reply_to_message needs a tag for the same reason (issue 35B): it is the message being
+	// replied to, nested inside the reply, and its text is how HandleUpdate recognises an
+	// answer to one of its own prompts.
 	var payload struct {
 		Result []struct {
 			UpdateID int64 `json:"update_id"`
@@ -185,7 +235,10 @@ func (t *Telegram) GetUpdates() ([]Update, error) {
 				Chat struct {
 					ID int64
 				}
-				Text string
+				Text           string
+				ReplyToMessage struct {
+					Text string
+				} `json:"reply_to_message"`
 			}
 		}
 	}
@@ -194,15 +247,16 @@ func (t *Telegram) GetUpdates() ([]Update, error) {
 		return nil, fmt.Errorf("get updates: %w", err)
 	}
 
-	// Reach through the nesting for the two values that matter and drop the container.
+	// Reach through the nesting for the values that matter and drop the container.
 	var updates []Update
 	for _, result := range payload.Result {
 		if result.UpdateID >= t.offset {
 			t.offset = result.UpdateID + 1
 		}
 		updates = append(updates, Update{
-			ChatID: result.Message.Chat.ID,
-			Text:   result.Message.Text,
+			ChatID:  result.Message.Chat.ID,
+			Text:    result.Message.Text,
+			ReplyTo: result.Message.ReplyToMessage.Text,
 		})
 	}
 

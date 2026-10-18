@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,7 +53,7 @@ func TestPollOnce_waitingMessage_isAnsweredBackToTelegram(t *testing.T) {
 	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
 	b := bot.New(bot.NewMemoryStore(), nil, nil)
 
-	if err := pollOnce(b, tg); err != nil {
+	if err := pollOnce(b, tg, io.Discard); err != nil {
 		t.Fatalf("pollOnce() returned error: %v", err)
 	}
 
@@ -75,6 +76,55 @@ func TestPollOnce_waitingMessage_isAnsweredBackToTelegram(t *testing.T) {
 	// as the stdin test above: this proves the wiring, not the wording.
 	if !strings.Contains(sentText, "/forgetme") {
 		t.Errorf("sent text %q, want it to contain %q", sentText, "/forgetme")
+	}
+}
+
+// Issue 33: every handled update leaves one log line, holding the chat ID and the command word
+// and nothing the user typed.
+//
+// The first user problem in production could not be diagnosed because a successful reply,
+// fallbacks included, logged nothing. The fallback is marked as "unknown command" so issue 34's
+// case stands out, and says whether there was text at all, since a sticker or photo arrives
+// with none.
+//
+// ⚠️ The arguments are free text and /privacy promises only the chosen MPs are stored; a log
+// is storage. So every update below carries a name or a sentence, and the test checks that
+// none of it reaches the log. The reply to the /unfollow prompt is logged as /unfollow, the
+// command it was handled as, not as the bare name that arrived.
+func TestPollOnce_logsOneLinePerUpdate_withoutWhatTheUserTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			fmt.Fprint(w, `{"ok":true,"result":[
+				{"update_id":900000001,"message":{"chat":{"id":4242},"text":"/help Andy Burnham"}},
+				{"update_id":900000002,"message":{"chat":{"id":4242},"text":"Andy Burnham",
+					"reply_to_message":{"text":"Send /unfollow followed by the MP's name, e.g. /unfollow Andy Burnham"}}},
+				{"update_id":900000003,"message":{"chat":{"id":99},"text":"hello Andy Burnham"}},
+				{"update_id":900000004,"message":{"chat":{"id":99},"sticker":{"file_id":"x"}}}
+			]}`)
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			fmt.Fprint(w, `{"ok":true}`)
+		}
+	}))
+	defer srv.Close()
+
+	tg := bot.NewTelegram(srv.URL, "TESTTOKEN")
+	b := bot.New(bot.NewMemoryStore(), nil, nil)
+
+	var log strings.Builder
+	if err := pollOnce(b, tg, &log); err != nil {
+		t.Fatalf("pollOnce() returned error: %v", err)
+	}
+
+	want := "chat 4242: /help\n" +
+		"chat 4242: /unfollow\n" +
+		"chat 99: text, unknown command\n" +
+		"chat 99: empty, unknown command\n"
+	if log.String() != want {
+		t.Errorf("pollOnce logged:\n%s\nwant:\n%s", log.String(), want)
+	}
+	if strings.Contains(log.String(), "Burnham") {
+		t.Errorf("pollOnce logged what the user typed:\n%s", log.String())
 	}
 }
 

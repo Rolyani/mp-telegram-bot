@@ -9,8 +9,9 @@ import (
 
 // Update represents an incoming message
 type Update struct {
-	ChatID int64
-	Text   string
+	ChatID  int64
+	Text    string
+	ReplyTo string
 }
 
 // Reply is what HandleUpdate returns
@@ -28,6 +29,12 @@ type Reply struct {
 	//
 	// Empty for every reply that asks nothing.
 	Choices []string
+
+	// ForceReply has Telegram open a reply box on this message, so that whatever the user
+	// sends next comes back as a reply to it, with ReplyTo set. Only the name prompts set it
+	// (see prompt): on any other reply it would quietly make the user's next message a reply
+	// to something that never asked a question.
+	ForceReply bool
 }
 
 // MemoryStore remembers chat IDs
@@ -285,7 +292,10 @@ func (b *Bot) CheckActivity() ([]Reply, error) {
 				if sent {
 					continue
 				}
-				replies = append(replies, Reply{ChatID: id, Text: act.Text})
+				// The source leaves the name out (see ActivitySource), so it is added here,
+				// in /latest's "Name: text" form. Without it, someone following several MPs
+				// cannot tell whose vote it is (issue 36).
+				replies = append(replies, Reply{ChatID: id, Text: mp.Name + ": " + act.Text})
 				if err := b.store.MarkSent(id, act.ID); err != nil {
 					return nil, err
 				}
@@ -327,6 +337,30 @@ func (s *MemoryStore) WasSent(chatID int64, activityID string) (bool, error) {
 // spelling out seventeen times — it keeps each branch about what the bot SAYS.
 func reply(chatID int64, text string) Reply {
 	return Reply{ChatID: chatID, Text: text}
+}
+
+// prompt is reply for the one kind of answer that asks the user for a name: it also has
+// Telegram open a reply box on the message, so that the name comes back with ReplyTo set
+// (issue 35B). A separate helper rather than a bool on reply, so that every other branch
+// stays reply(chatID, text) and this one says what it is.
+func prompt(chatID int64, text string) Reply {
+	return Reply{ChatID: chatID, Text: text, ForceReply: true}
+}
+
+// The prompts that answer a command sent without its name. Each is named once because
+// HandleUpdate also matches replies against it (issue 35B): if the reply and the match held
+// separate copies, a one-letter difference would quietly stop replies being recognised.
+const (
+	followPrompt   = "Send /follow followed by the MP's name, e.g. /follow Andy Burnham"
+	unfollowPrompt = "Send /unfollow followed by the MP's name, e.g. /unfollow Andy Burnham"
+	findPrompt     = "Send /find followed by a name to search for, e.g. /find Burnham"
+)
+
+// promptCommands maps each prompt to the command that an answer to it completes.
+var promptCommands = map[string]string{
+	followPrompt:   "/follow",
+	unfollowPrompt: "/unfollow",
+	findPrompt:     "/find",
 }
 
 // apiDown is what every command says when the Members API cannot be reached. Named once
@@ -374,6 +408,48 @@ func matchingFollows(follows []Member, fragment string) []Member {
 	return matches
 }
 
+// commands is every command HandleUpdate answers, for Command. Kept beside the switch it
+// mirrors; TestCommand_recognisesEveryCommandInHelp catches the two drifting apart.
+var commands = []string{
+	"/start", "/stop", "/find", "/follow", "/unfollow", "/list", "/latest",
+	"/help", "/forgetme", "/privacy", "/source",
+}
+
+// parse splits an update into the command word and its argument, as HandleUpdate sees them.
+//
+// A reply to a name prompt is the name it asked for (issue 35B). Telegram hands back the text
+// of the message being replied to, so the bot recognises its own prompt by that text and keeps
+// no record of having asked. A reply that is itself a command is handled as typed: prefixing
+// "/follow Andy Burnham" would search for an MP of that name.
+//
+// The command word loses any @botname suffix and is lowercased (issue 32): a group's command
+// menu sends /start@BotName, and a phone auto-capitalises /Start. Any suffix is stripped, not
+// only this bot's, since the bot is used in direct chats. The argument is left exactly as
+// typed: it is an MP's name, and goes to the resolver that way.
+func parse(update Update) (cmd, arg string) {
+	text := update.Text
+	if command, ok := promptCommands[update.ReplyTo]; ok && !strings.HasPrefix(text, "/") {
+		text = command + " " + text
+	}
+	cmd, arg, _ = strings.Cut(text, " ")
+	if strings.HasPrefix(cmd, "/") {
+		cmd, _, _ = strings.Cut(cmd, "@")
+		cmd = strings.ToLower(cmd)
+	}
+	return cmd, arg
+}
+
+// Command returns the command an update will be handled as, or "" if HandleUpdate will answer
+// it with the fallback. It never returns anything the user typed beyond a known command word,
+// which is what makes it safe to log (issue 33).
+func Command(update Update) string {
+	cmd, _ := parse(update)
+	if slices.Contains(commands, cmd) {
+		return cmd
+	}
+	return ""
+}
+
 // HandleUpdate processes an update and returns a reply.
 //
 // Note the return values are NOT the usual either/or: a non-nil error still carries a
@@ -382,7 +458,7 @@ func matchingFollows(follows []Member, fragment string) []Member {
 // retry on — and both are served in one call. Callers must therefore send the Reply
 // before deciding what to do about the error, not return early on it.
 func (b *Bot) HandleUpdate(update Update) (Reply, error) {
-	cmd, arg, _ := strings.Cut(update.Text, " ")
+	cmd, arg := parse(update)
 	switch cmd {
 	case "/start":
 		// ⚠️ The confirmation is only reached if the write succeeded. A user welcomed into a
@@ -399,7 +475,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/find":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Please enter an MP's name to search for."), nil
+			return prompt(update.ChatID, findPrompt), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
@@ -419,7 +495,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/follow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Please enter an MP's name to follow."), nil
+			return prompt(update.ChatID, followPrompt), nil
 		}
 		members, err := b.resolver.ResolveName(name)
 		if err != nil {
@@ -461,7 +537,7 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 	case "/unfollow":
 		name := strings.TrimSpace(arg)
 		if name == "" {
-			return reply(update.ChatID, "Please enter an MP's name to unfollow."), nil
+			return prompt(update.ChatID, unfollowPrompt), nil
 		}
 		follows, err := b.store.Follows(update.ChatID)
 		if err != nil {
@@ -534,13 +610,20 @@ func (b *Bot) HandleUpdate(update Update) (Reply, error) {
 		}
 		return reply(update.ChatID, "Your follows and account have been removed."), nil
 	case "/privacy":
+		// ⚠️ Every sentence here is a claim about the system, so it changes when the system
+		// does. The logs line follows describe in cmd/mp-bot (issue 33); "cleared on the next
+		// update" holds because nothing collects pod logs, so they go with the pod. Add log
+		// shipping and this becomes untrue.
 		return reply(update.ChatID,
-			"This bot only stores the MPs you select. No other personal information is collected.\n"+
-				"The /forgetme command will wipe all of the data stored for your ID"), nil
+			"This bot stores your chat ID, the MPs you follow, and which of their votes it has already sent you. Nothing else is collected.\n"+
+				"\n"+
+				"Its logs record your chat ID and the command you sent (e.g. /follow), never what you typed after it. Logs are cleared each time the bot is updated.\n"+
+				"\n"+
+				"/forgetme wipes everything stored for your chat ID straight away. It cannot reach the logs, which clear at the next update."), nil
 	case "/source":
 		return reply(update.ChatID, "Full code available at: https://github.com/Rolyani/mp-telegram-bot"), nil
 	default:
-		return reply(update.ChatID, "Use /start to begin."), nil
+		return reply(update.ChatID, "Sorry, I didn't understand that. Send /help to see what I can do."), nil
 	}
 }
 
